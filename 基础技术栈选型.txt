@@ -1,0 +1,47 @@
+自动选品工作台：基础技术栈选型
+核对日期：2026-10-31（北京时间）
+
+目标：Cloudflare 云端运行、人员网页登录、美国站商品每天自动发现与更新、OpenRouter 驱动 AI 研究；现有 22,664 件商品作为初始底库。今天优先完成可操作页面，业务规则后续随主管意见调整。
+
+VibeStart 核对结果
+- npm 发布版本与实际 CLI 版本均为 0.1.3。
+- 已运行固定版本 --help、--list --json。
+- 在 .vibestart-inspect 隔离目录执行创建 dry-run；目标为工作区下 workbench。
+- 预览返回 ok=true，fileCount=71；未创建项目，未运行项目安装、项目测试或部署。
+- 原始预览保存在 .vibestart-inspect/stack-preview.json。
+
+建议采用的应用骨架（已通过 CLI 组合解析）
+- 语言：TypeScript。
+- 工具链：Vite+；包管理：pnpm。
+- 前端：React SPA、TanStack Router、TanStack Query。
+- 组件：shadcn/ui，按工作台界面做独立视觉设计。
+- 后端：Hono；运行时：Cloudflare Workers。
+- 内部 API：oRPC；负责前后端接口类型及参数约束。
+- 部署通道：Void（当前模板标为预览版，正式部署需验证）。
+- 测试：Vitest 工具链与 Playwright；质量工具：Knip、Ultracite。
+- 不生成 Electron、Expo 或 Docker。
+
+业务层自行接入的 Cloudflare 能力
+- D1：商品当前数据、历史指标、任务进度、候选池、人工反馈；初期使用原生 D1 bindings 和 SQL migrations。
+- R2：API 原始响应、较大研究结果、长期归档。
+- Cron Triggers：每日发起任务；按北京时间配置对应 UTC 时间。
+- Workflows：采集和 AI 多步骤任务、断点与进度；视实际需要补 Queues，不预先堆叠两套任务系统。
+- Cloudflare Access：初期人员登录；应用后端继续验证身份并做业务权限控制。
+- Workers secrets：极鲸云与 OpenRouter 密钥；不发给浏览器。
+
+生成器边界
+- 0.1.3 当前不提供 D1 数据库选项。sqlite 选项是 node:sqlite，不等同 D1，也不能在 Workers 部署中直接替代 D1。
+- 因此骨架使用 database=none、orm=none、auth=none；这只表示模板不生成这三项，不表示成品没有数据库或登录。
+- D1、R2、Access、每日任务、Workflows 需要实际实现与 Cloudflare 配置，不是 dry-run 已完成的能力。
+- 不为适配模板而额外引入外部 PostgreSQL/MySQL 服务；不手改 vibestart.jsonc 的生成器记录。
+- Void 的部署预览状态与 D1/任务绑定能力需要上线前验证；必要时给任务单独配置 Cloudflare Worker。
+
+AI 与数据接入
+- 极鲸云：每日补充商品、刷新关注对象、保留来源时间及历史。
+- OpenRouter：openai/gpt-6.1-terra 负责研究；openai/gpt-6-luna-decisions 负责结构化判断。
+- 聊天/研究与 Decisions 分别封装，后者使用 OpenRouter /api/alpha/decisions，不能作为普通聊天接口调用。
+- Amazon 优先 SP-API；接口能力按真实账号返回核对。
+- API 是持续数据源，初始缓存仅用于初始化和开发验证；页面从后台数据库查询，不直接在浏览器中跑批量采集。
+
+下一步（尚未执行）
+在确认该选型后，用同一固定版本的同一命令去掉 --dry-run 创建 workbench；按 CLI 实际 nextSteps 准备 Vite+、依赖和校验。创建与部署是两个独立动作，不能把生成成功当成云端可用。

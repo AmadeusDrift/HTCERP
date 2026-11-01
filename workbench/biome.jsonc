@@ -1,0 +1,31 @@
+{
+  "$schema": "./node_modules/@biomejs/biome/configuration_schema.json",
+  "linter": { "enabled": true, "rules": { "preset": "recommended" } },
+  "vcs": {
+    "enabled": false
+  },
+  "files": {
+    "includes": [
+      "apps/**",
+      "packages/**",
+      "scripts/**",
+      "tests/**",
+      "*.ts",
+      "!!**/node_modules",
+      "!!**/.local",
+      "!!**/.wrangler",
+      "!!**/dist"
+    ]
+  },
+  "formatter": {
+    "lineWidth": 105,
+    "indentStyle": "space",
+    "indentWidth": 2
+  },
+  "javascript": {
+    "formatter": {
+      "semicolons": "asNeeded",
+      "quoteStyle": "single"
+    }
+  }
+}

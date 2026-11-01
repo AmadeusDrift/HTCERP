@@ -1,0 +1,144 @@
+.sidebar .module-nav {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-block: 10px;
+}
+.module-nav > nav:not(#selection-nav) {
+  padding-inline: 9px;
+}
+.sidebar .module-nav .nav-group {
+  width: calc(100% - 18px);
+  margin: 3px 9px;
+  min-height: 43px;
+  padding-inline: 14px;
+  justify-content: flex-start;
+  gap: 12px;
+}
+.module-nav .nav-group > svg:first-child {
+  transform: none;
+  stroke-width: 1.65;
+}
+.module-nav .nav-group > svg:last-child {
+  margin-left: auto;
+}
+.module-nav #selection-nav {
+  padding-left: 27px;
+}
+.module-nav > nav:not(#selection-nav) > a {
+  font-weight: 650;
+}
+.sidebar .brand small {
+  white-space: nowrap;
+  letter-spacing: 0.7px;
+}
+
+.store-sales {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.store-sales .page-title,
+.store-sales .metrics,
+.store-sales .panel {
+  margin: 0;
+}
+.sales-status {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid #cddae5;
+  border-radius: 7px;
+  padding: 13px 16px;
+  background: #f3f7fa;
+  color: #334b5e;
+}
+.sales-status > svg {
+  flex: none;
+}
+.sales-status strong {
+  font-size: 14px;
+}
+.sales-status p,
+.sales-footnote,
+.sales-rules p {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.65;
+}
+.sales-status > .badge {
+  margin-left: auto;
+  white-space: nowrap;
+}
+.sales-status.simulated {
+  background: #fcf8ed;
+  border-color: #e6d7b0;
+  color: #6f521b;
+}
+.sales-tag {
+  color: var(--muted);
+  font-size: 12px;
+  text-align: right;
+}
+.sales-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.sales-day-picker {
+  display: flex;
+  justify-content: flex-end;
+}
+.sales-footnote {
+  margin: 0;
+  padding: 11px 16px;
+  border-top: 1px solid var(--line);
+}
+.sales-table th,
+.sales-table td {
+  white-space: nowrap;
+}
+.sales-table small {
+  display: block;
+  color: var(--muted);
+  font-size: 11px;
+}
+.sales-table b {
+  font-weight: 550;
+}
+.sales-table .product-title-preview {
+  max-width: clamp(11rem, 26vw, 32rem);
+}
+.sales-rank {
+  color: #486987;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+.sales-rules {
+  padding: 8px 14px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: white;
+}
+.sales-rules p:last-child {
+  margin-bottom: 6px;
+}
+@media (max-width: 600px) {
+  .sales-status {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .sales-status > div {
+    flex: 1;
+    min-width: 70%;
+  }
+  .sales-status > .badge {
+    margin-left: 31px;
+  }
+  .store-sales .panel-head {
+    gap: 8px;
+  }
+}

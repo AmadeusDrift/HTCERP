@@ -1,0 +1,23 @@
+{
+  "entry": [
+    "apps/api/src/index.ts",
+    "apps/jobs/src/index.ts",
+    "apps/web/src/main.tsx",
+    "packages/catalog/bootstrap-cli.mjs",
+    "scripts/*.mjs",
+    "**/*.test.ts",
+    "tests/e2e/*.spec.ts",
+    "tests/integration/*.mjs",
+    "*.config.ts"
+  ],
+  "project": [
+    "apps/**/*.{ts,tsx}",
+    "packages/**/*.{ts,mjs}",
+    "scripts/*.mjs",
+    "tests/**/*.{ts,mjs}",
+    "*.config.ts"
+  ],
+  "ignoreDependencies": [
+    "cloudflare"
+  ]
+}

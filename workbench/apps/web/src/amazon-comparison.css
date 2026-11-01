@@ -1,0 +1,65 @@
+.amz-compare {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+  margin-block: 8px;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.amz-heading,
+.amz-meta,
+.amz-retry {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+}
+.amz-heading strong {
+  font-size: 14px;
+}
+.amz-heading span,
+.amz-compare small,
+.amz-meta,
+.amz-retry small {
+  color: #586b7b;
+  font-size: 12px;
+}
+.amz-compare table {
+  table-layout: fixed;
+  min-width: 0;
+}
+.amz-compare th,
+.amz-compare td {
+  padding: 6px 9px;
+  vertical-align: top;
+  white-space: normal;
+  border: 1px solid var(--line);
+}
+.amz-compare th {
+  color: #35485c;
+  background: #f4f7f9;
+}
+.amz-compare th + th {
+  background: #edf5f3;
+  color: #236558;
+}
+.amz-compare td small,
+.amz-basis span,
+.amz-empty span {
+  display: block;
+}
+.amz-compare a svg {
+  display: inline;
+  vertical-align: middle;
+}
+.amz-basis b {
+  color: #435974;
+}
+.amz-meta {
+  align-items: baseline;
+}
+.amz-retry .notice {
+  width: 100%;
+}

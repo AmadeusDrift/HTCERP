@@ -1,0 +1,11 @@
+node_modules/
+.wrangler/
+.local/
+dist/
+.dev.vars*
+!.dev.vars.example
+.env*
+test-results/
+playwright-report/
+*.local.jsonc
+

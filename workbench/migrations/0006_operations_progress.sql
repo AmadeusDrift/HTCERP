@@ -1,0 +1,10 @@
+ALTER TABLE usage_reservations ADD COLUMN attempt INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE usage_reservations ADD COLUMN logical_key TEXT;
+UPDATE usage_reservations SET logical_key=step_key;
+CREATE INDEX usage_logical ON usage_reservations(run_id,logical_key,attempt);
+ALTER TABLE job_seen ADD COLUMN total_sold INTEGER;
+ALTER TABLE job_seen ADD COLUMN evidence_ref TEXT;
+ALTER TABLE job_seen ADD COLUMN child_id TEXT REFERENCES job_runs(id);
+CREATE INDEX discovery_research_queue ON job_seen(run_id,tier DESC,total_sold DESC,product_id);
+ALTER TABLE job_runs ADD COLUMN parent_id TEXT REFERENCES job_runs(id);
+CREATE INDEX job_children ON job_runs(parent_id);

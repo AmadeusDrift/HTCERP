@@ -1,0 +1,52 @@
+{
+  "name": "selection-workbench",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.25.0",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "vite build apps/web --outDir ../../dist/web --emptyOutDir",
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "db:local": "node scripts/setup-local.mjs",
+    "dev": "node scripts/dev.mjs",
+    "stop": "node scripts/stop.mjs",
+    "test:workflow": "node tests/integration/workflow-runtime.mjs",
+    "check:unused": "knip --include files,dependencies,unlisted",
+    "check:style": "ultracite check apps packages scripts tests playwright.config.ts vitest.config.ts --diagnostic-level=error",
+    "check:workers": "wrangler deploy --config wrangler.jobs.jsonc --dry-run --outdir .local/dry-jobs && wrangler deploy --config wrangler.api.jsonc --dry-run --outdir .local/dry-api"
+  },
+  "dependencies": {
+    "@fontsource-variable/inter": "5.3.0",
+    "@fontsource-variable/noto-sans-sc": "5.3.1",
+    "@orpc/client": "1.16.1",
+    "@orpc/server": "^1",
+    "@tanstack/react-query": "^5",
+    "@tanstack/react-router": "^1",
+    "hono": "^4",
+    "jose": "^6",
+    "lucide-react": "^0.577.0",
+    "react": "^19",
+    "react-dom": "^19",
+    "zod": "^4"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.6.4",
+    "@cloudflare/workers-types": "^5.20261023.1",
+    "@playwright/test": "^1",
+    "@types/node": "^24",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "knip": "^6.44.0",
+    "miniflare": "5.20261023.3-beta",
+    "typescript": "~5.9.0",
+    "ultracite": "^8.1.0",
+    "vite": "^7",
+    "vitest": "^4",
+    "wrangler": "4.156.0"
+  }
+}

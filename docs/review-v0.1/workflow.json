@@ -1,0 +1,195 @@
+{
+  "schema_version": 1,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "每日选品与 AI 研究 · 待确认流程",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "viewBox": [
+      970,
+      590
+    ]
+  },
+  "lanes": [
+    {
+      "id": "data",
+      "label": "发现与更新"
+    },
+    {
+      "id": "exceptions",
+      "label": "分流与异常"
+    },
+    {
+      "id": "ai",
+      "label": "AI 研究"
+    },
+    {
+      "id": "human",
+      "label": "人员运营"
+    }
+  ],
+  "mainPath": [
+    "start",
+    "budget",
+    "fetch",
+    "store",
+    "classify",
+    "research",
+    "review"
+  ],
+  "nodes": [
+    {
+      "id": "start",
+      "lane": "data",
+      "col": 0,
+      "type": "cloud",
+      "label": "每日或手动触发",
+      "sublabel": "策略版本 / 唯一租约"
+    },
+    {
+      "id": "budget",
+      "lane": "data",
+      "col": 2,
+      "type": "security",
+      "label": "权限与预算",
+      "sublabel": "原子预留 / 允许工具"
+    },
+    {
+      "id": "fetch",
+      "lane": "data",
+      "col": 3,
+      "type": "external",
+      "label": "发现与更新",
+      "sublabel": "极鲸云 / SP-API"
+    },
+    {
+      "id": "store",
+      "lane": "data",
+      "col": 5,
+      "type": "database",
+      "label": "去重与保存",
+      "sublabel": "D1 指标 / R2 原始证据"
+    },
+    {
+      "id": "classify",
+      "lane": "exceptions",
+      "col": 5,
+      "type": "backend",
+      "label": "候选分流",
+      "sublabel": "Decisions / 规则版本"
+    },
+    {
+      "id": "research",
+      "lane": "ai",
+      "col": 5,
+      "type": "backend",
+      "label": "研究与候选",
+      "sublabel": "Terra / 标品与POD报告"
+    },
+    {
+      "id": "review",
+      "lane": "human",
+      "col": 5,
+      "type": "frontend",
+      "label": "人员评估反馈",
+      "sublabel": "反馈 / 持续追踪"
+    },
+    {
+      "id": "watch",
+      "lane": "ai",
+      "col": 4,
+      "type": "frontend",
+      "label": "观察与复核",
+      "sublabel": "证据不足 / 暂不下结论"
+    },
+    {
+      "id": "pause",
+      "lane": "exceptions",
+      "col": 2,
+      "type": "security",
+      "label": "暂停任务",
+      "sublabel": "补充授权或预算后恢复"
+    },
+    {
+      "id": "failure",
+      "lane": "exceptions",
+      "col": 3,
+      "type": "messagebus",
+      "label": "保留进度与异常",
+      "sublabel": "退避 / 核验 / 幂等补跑"
+    }
+  ],
+  "edges": [
+    {
+      "from": "start",
+      "to": "budget",
+      "role": "main"
+    },
+    {
+      "from": "budget",
+      "to": "fetch",
+      "label": "允许执行",
+      "role": "main",
+      "labelDy": -20
+    },
+    {
+      "from": "fetch",
+      "to": "store",
+      "role": "main",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "from": "store",
+      "to": "classify",
+      "label": "可研究数据",
+      "role": "main",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "from": "classify",
+      "to": "research",
+      "label": "值得深查",
+      "role": "main",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "from": "classify",
+      "to": "watch",
+      "label": "证据不足",
+      "role": "branch",
+      "fromSide": "left",
+      "toSide": "top",
+      "via": [
+        [
+          500,
+          243
+        ]
+      ]
+    },
+    {
+      "from": "budget",
+      "to": "pause",
+      "label": "未获授权 / 超预算",
+      "role": "error",
+      "variant": "security",
+      "labelDx": -36
+    },
+    {
+      "from": "fetch",
+      "to": "failure",
+      "label": "鉴权 / 限流 / 超时",
+      "role": "error",
+      "variant": "security",
+      "labelDx": 40
+    },
+    {
+      "from": "research",
+      "to": "review",
+      "label": "证据与建议",
+      "role": "main"
+    }
+  ]
+}

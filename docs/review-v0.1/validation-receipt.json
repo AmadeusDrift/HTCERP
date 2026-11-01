@@ -1,0 +1,18 @@
+{
+  "architecture": {
+    "diagram_type": "architecture",
+    "specification_sha256": "ad4c1ae599074b0c668dcf1eb24217168841e3383c7bc14f82c353347c1d434c",
+    "artifact_sha256": "dd2e4c128efa55f69c04062d3327d29ab4bbc3e3b28a3b303e8844371465b28b",
+    "validation": "9/9 showcase; 0 errors; 0 warnings",
+    "desktop_containment": "pass: 1440x900, 1600x1000, 1920x1080, 2048x1320",
+    "visual_review": "passed; light and dark screenshots inspected"
+  },
+  "workflow": {
+    "diagram_type": "workflow",
+    "specification_sha256": "2f6ff6108a5fedfdb3001ac7507fd78e286b3a6da6d9a7cdb94f9827a4e75924",
+    "artifact_sha256": "ce72572eb95efe905dd79825437bffc90e2367990adb2faaed958930c2f4719a",
+    "validation": "9/9 showcase; 0 errors; 0 warnings",
+    "desktop_containment": "pass: 1440x900, 1600x1000, 1920x1080, 2048x1320",
+    "visual_review": "passed; light and dark screenshots inspected"
+  }
+}

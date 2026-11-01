@@ -1,0 +1,26 @@
+.personal-presets {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.personal-presets li,
+.personal-presets li > div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.personal-presets li {
+  justify-content: space-between;
+  flex-wrap: wrap;
+  padding: 10px 0;
+}
+.personal-presets li + li,
+.personal-save {
+  border-top: 1px solid var(--line);
+}
+.personal-presets strong {
+  overflow-wrap: anywhere;
+}
+.personal-save {
+  padding-top: 16px;
+}

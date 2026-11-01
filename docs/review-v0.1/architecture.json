@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {"title": "自动选品工作台 · 待确认架构", "locale": "zh-CN", "quality_profile": "showcase"},
+  "components": [
+    {"id":"browser","type":"frontend","label":"网页登录","sublabel":"React 工作台","pos":[40,100],"size":[170,76]},
+    {"id":"access","type":"security","label":"身份与权限","sublabel":"Access + 应用角色","pos":[330,100],"size":[170,76]},
+    {"id":"api","type":"backend","label":"业务接口","sublabel":"Hono / oRPC","pos":[620,100],"size":[170,76]},
+    {"id":"data","type":"database","label":"业务数据","sublabel":"D1 / 历史指标","pos":[910,100],"size":[170,76]},
+    {"id":"cron","type":"cloud","label":"每日触发","sublabel":"Cron · 北京时间配置","pos":[40,350],"size":[170,76]},
+    {"id":"jobs","type":"backend","label":"任务执行","sublabel":"Workflows / 预算与恢复","pos":[330,350],"size":[170,76]},
+    {"id":"modules","type":"backend","label":"研究链路模块","sublabel":"发现 → 更新 → 判断 → 研究","pos":[620,350],"size":[230,76]},
+    {"id":"archive","type":"database","label":"原始数据归档","sublabel":"R2 / 证据文件","pos":[910,350],"size":[170,76]},
+    {"id":"sources","type":"external","label":"数据适配器","sublabel":"极鲸云 / Amazon SP-API","pos":[480,600],"size":[230,76]},
+    {"id":"models","type":"external","label":"AI 适配器","sublabel":"OpenRouter / Terra + Decisions","pos":[850,600],"size":[270,76]}
+  ],
+  "connections": [
+    {"from":"browser","to":"access","label":"HTTPS"},
+    {"from":"access","to":"api","label":"验证身份","variant":"security"},
+    {"from":"api","to":"data","label":"查询 / 反馈"},
+    {"from":"cron","to":"jobs","label":"每日一次"},
+    {"from":"api","to":"jobs","label":"人工发起","variant":"dashed","fromSide":"bottom","toSide":"top"},
+    {"from":"jobs","to":"modules","label":"执行步骤","labelDy":36},
+    {"from":"modules","to":"data","label":"保存结果","fromSide":"top","toSide":"bottom"},
+    {"from":"modules","to":"archive","label":"保存证据","labelDy":36},
+    {"from":"modules","to":"sources","label":"获取数据","fromSide":"bottom","toSide":"top"},
+    {"from":"modules","to":"models","label":"研究 / 判断","fromSide":"bottom","toSide":"top"}
+  ]
+}

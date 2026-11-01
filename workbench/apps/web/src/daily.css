@@ -1,0 +1,60 @@
+.daily-date {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.daily-summary {
+  padding: 16px;
+}
+.daily-summary p {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.65;
+}
+.daily-tabs {
+  padding-inline: 16px;
+}
+.daily-table {
+  table-layout: fixed;
+  min-width: 680px;
+}
+.daily-table th:nth-child(1) {
+  width: 30%;
+}
+.daily-table th:nth-child(2) {
+  width: 16%;
+}
+.daily-table th:nth-child(4) {
+  width: 14%;
+}
+.daily-table small,
+.daily-table td:last-child a {
+  display: block;
+  margin-top: 4px;
+}
+.daily-product,
+.daily-reason {
+  overflow-wrap: anywhere;
+  line-height: 1.6;
+}
+.daily-product {
+  font-weight: 550;
+}
+.daily-reason {
+  margin-top: 6px;
+}
+
+.potential-table th:nth-child(4) { width: 30%; }
+.potential-label { display: none; }
+@media (max-width: 980px) {
+  .potential-table, .potential-table tbody { display: block; min-width: 0; width: 100%; }
+  .potential-table thead { display: none; }
+  .potential-table tr { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; padding: 12px; border-bottom: 1px solid var(--line); }
+  .potential-table tbody td { width: auto; border: 0; padding: 0; white-space: normal; }
+  .potential-table td:first-child, .potential-table td:last-child { grid-column: 1 / -1; }
+  .potential-table .daily-product { min-height: 44px; }
+  .potential-label { display: block; color: var(--muted); font-size: 12px; }
+}
