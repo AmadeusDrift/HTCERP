@@ -131,21 +131,21 @@ export function Potential() {
                         <PageLink className="potential-item" href={productUrl(p.id, url)} title={p.title}>
                           <Thumb p={p}/>
                           <span className="potential-copy">
-                            <span className="potential-name">
+                            <b>{p.title}</b>
+                            <small className="potential-category">
                               <PlatformInitial id={p.id.split(':')[0]}/>
-                              <b>{p.title}</b>
-                            </span>
-                            <small>{p.category.split(' / ').at(-1)}</small>
+                              <span>{p.category.split(' / ').at(-1)}</span>
+                            </small>
                           </span>
                         </PageLink>
                       </td>
                       <td>
                         <span className="potential-label">最低展示价</span>{money(p.price)}
-                        <small>{date(p.listed)}</small>
+                        <small className="potential-date">{date(p.listed)}</small>
                       </td>
                       <td>
                         <span className="potential-label">日销量 / 近七天销量</span>{amount(p.daySold)} / {amount(p.weekSold)}
-                        <small>数据日期 {date(p.observed)}</small>
+                        <small className="potential-date">数据日期 {date(p.observed)}</small>
                       </td>
                       <td>
                         <Badge tone={p.grade === 'priority' ? 'teal' : 'neutral'}>

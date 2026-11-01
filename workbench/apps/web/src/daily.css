@@ -55,9 +55,10 @@
 .potential-item .thumb{width:46px;height:46px;flex:0 0 46px}
 .potential-item .thumb img{object-fit:contain}
 .potential-copy{min-width:0;flex:1}
-.potential-name{display:flex;align-items:center;gap:6px;min-width:0}
-.potential-name b{min-width:0}
-.potential-copy b,.potential-copy small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.potential-copy b,.potential-category>span:last-child{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.potential-table .potential-category{display:flex;align-items:center;gap:5px}
+.potential-category .platform-initial{width:15px;height:15px;flex-basis:15px;font-size:11px}
+.potential-table td small.potential-date{font-size:11px;line-height:1.35;font-weight:400;color:var(--muted)}
 .potential-label { display: none; }
 @media (max-width: 980px) {
   .potential-table, .potential-table tbody { display: block; min-width: 0; width: 100%; }
