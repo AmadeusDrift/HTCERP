@@ -1,5 +1,5 @@
-// Official US defaults are 2, 0.5 and 0.1 requests/s. Leave 20% headroom and avoid bursts.
-const intervals = { catalog: 625, offer: 2500, batch: 12500 } as const
+// Official defaults: 2, 0.5, 0.1 requests/s. Our US batch calls still saw 429 at 12.5s.
+const intervals = { catalog: 625, offer: 2500, batch: 25000 } as const
 const clock = "CAST(unixepoch('subsec')*1000 AS INTEGER)"
 export type AmazonOperation = keyof typeof intervals
 export function pacedOperation(url: URL | string): AmazonOperation | undefined {
