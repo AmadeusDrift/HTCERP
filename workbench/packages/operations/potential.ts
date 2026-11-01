@@ -11,6 +11,7 @@ export type PotentialGrade = keyof typeof gradeLabels
 export interface PotentialItem {
   id: string
   title: string
+  thumbnail: string | null
   category: string
   price: number
   listed: string | null
@@ -39,7 +40,7 @@ export async function potentialProducts(
   const sinceWeek = new Date(Date.parse(asOf) - 7 * dayMs).toISOString()
   // Each dated candidate has a comparable daily pace only after one full week on sale.
   const sql = `WITH scoped AS (
-    SELECT id,coalesce(nullif(title_cn,''),title) title,coalesce(nullif(category_path,''),category_name,'未分类') category,
+    SELECT id,thumbnail,coalesce(nullif(title_cn,''),title) title,coalesce(nullif(category_path,''),category_name,'未分类') category,
       min_price price,on_sale_at listed,coalesce(updated_at,fetched_at) observed,day_sold daySold,week_sold weekSold
     FROM products p WHERE platform=? AND market='US' AND currency='USD' AND min_price BETWEEN 0 AND ?
       AND category_id IN (SELECT category_id FROM category_mappings WHERE group_key=? AND platform=p.platform)

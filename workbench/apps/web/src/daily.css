@@ -48,6 +48,14 @@
 }
 
 .potential-table th:nth-child(4) { width: 30%; }
+.potential-filters{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;padding:12px 14px 0}
+.potential-filters>*{width:100%;min-width:0}
+.potential-hint{margin:0;padding:7px 14px 10px;font-size:12px;color:var(--muted)}
+.potential-item{display:flex;align-items:center;gap:10px;min-width:0;min-height:48px}
+.potential-item .thumb{width:46px;height:46px;flex:0 0 46px}
+.potential-item .thumb img{object-fit:contain}
+.potential-copy{min-width:0;flex:1}
+.potential-copy b,.potential-copy small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .potential-label { display: none; }
 @media (max-width: 980px) {
   .potential-table, .potential-table tbody { display: block; min-width: 0; width: 100%; }

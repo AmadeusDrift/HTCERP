@@ -215,7 +215,7 @@ export function Status({ status }: { status: string }) {
     </Badge>
   )
 }
-export function Thumb({ p, big = false }: { p: Product; big?: boolean }) {
+export function Thumb({ p, big = false }: { p: Pick<Product,'title'|'thumbnail'> & Partial<Pick<Product,'title_cn'>>; big?: boolean }) {
   const [failedUrl, setFailedUrl] = useState<string | null>(null)
   return (
     <span className={'thumb' + (big ? ' big' : '')}>

@@ -18,6 +18,7 @@ import {
   Panel,
   productUrl,
   Title,
+  Thumb,
   useAccess,
   useData,
   useGo,
@@ -79,9 +80,8 @@ export function Potential() {
         )}
       </Title>
       <ErrorBox error={run.error} />
-      <Panel
-        title="新品评估"
-        extra={
+      <Panel>
+        <div className="potential-filters">
           <Select
             aria-label="评级范围"
             value={grade}
@@ -91,24 +91,17 @@ export function Potential() {
               ...Object.entries(gradeLabels).map(([value, label]) => ({ value, label })),
             ]}
           />
-        }
-      >
-        {result.data && result.data.categories.length > 0 && (
-          <div className="panel-body">
             <Select
               aria-label="商品类目"
               value={params.get('category') || ''}
               onValueChange={(v) => change('category', v)}
               options={[
                 { value: '', label: '全部商品类目' },
-                ...result.data.categories.map((value) => ({ value, label: value })),
+                ...(result.data?.categories ?? []).map((value) => ({ value, label: value })),
               ]}
             />
-          </div>
-        )}
-        <div className="panel-body">
-          自动评估已收录商品。按最近一天与前六天的日均销量比较，同档优先显示近七天销量较高的商品。在线寻找新品将使用团队数据积分。
         </div>
+        <p className="potential-hint">按近七天销量表现自动评级。</p>
         {result.isPending ? (
           <Loading />
         ) : result.isError ? (
@@ -134,10 +127,10 @@ export function Potential() {
                   {result.data.items.map((p) => (
                     <tr key={p.id}>
                       <td>
-                        <PageLink className="daily-product" href={productUrl(p.id, url)}>
-                          {p.title}
+                        <PageLink className="potential-item" href={productUrl(p.id, url)} title={p.title}>
+                          <Thumb p={p}/>
+                          <span className="potential-copy"><b>{p.title}</b><small>{p.category.split(' / ').at(-1)}</small></span>
                         </PageLink>
-                        <small>{p.category}</small>
                       </td>
                       <td>
                         <span className="potential-label">最低展示价</span>{money(p.price)}
