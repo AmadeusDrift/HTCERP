@@ -28,6 +28,7 @@ import {
   useWrite,
 } from './ui'
 import './admin-reports.css'
+import './selection-sheet.css'
 
 const archiveUrl = '/daily?view=preview'
 const names = { selection: '选品日报', tracking: '商品追踪日报' }
@@ -346,26 +347,30 @@ function SelectionOverview({ r }: { r: AdminReport }) {
   const rising = series.filter(({w}) => w[w.length-1] > w[w.length-2]).sort((a,b)=>(b.w.at(-1)!-b.w.at(-2)!)-(a.w.at(-1)!-a.w.at(-2)!))
   const stable = series.filter(({w}) => w.length===4 && Math.min(...w)>=100 && Math.max(...w)<=Math.min(...w)*1.25).sort((a,b)=>Math.min(...b.w)-Math.min(...a.w))
   return <section className="rp-chart erp-summary"><h2>本期选品总览</h2><div className="erp-summary-grid"><div>
-    <p>检查 <b>{amount(r.examined)}</b> 款　入选 <b>{amount(r.matched)}</b> 款　未入选 <b>{amount(r.examined-r.matched)}</b> 款</p>
+    <div className="selection-counts">{[['检查',r.examined],['入选',r.matched],['未入选',r.examined-r.matched]].map(([label,count])=><div key={label}><small>{label}</small><strong>{count}<i>款</i></strong></div>)}</div>
     {!!r.exclusions?.length && <><h3>未入选的主要原因</h3>{r.exclusions.map(x=><Bar key={x.reason} label={x.reason} value={x.n} max={Math.max(...r.exclusions!.map(v=>v.n))}/>)}</>}
     </div>{!!rising.length && <div><h3>销量增长 · 近两周对比</h3>{rising.slice(0,3).map(({p,w})=><p key={p.id}>{p.title.slice(0,24)} · {w.at(-2)} → {w.at(-1)} 件</p>)}</div>}
     {!!stable.length && <div><h3>稳定有量 · 近四周</h3><small>每周至少 100 件，最高周比最低周至多高 25%</small>{stable.slice(0,3).map(({p,w})=><p key={p.id}>{p.title.slice(0,24)} · {w.join(' / ')} 件</p>)}</div>}</div></section>
 }
 function SelectionList({r}:{r:AdminReport}){
-  const [query,setQuery]=useState(''),[page,setPage]=useState(0)
-  const rows=r.items.filter(p=>(p.title+' '+p.id).toLowerCase().includes(query.trim().toLowerCase()))
-  return <section className="erp-list"><input aria-label="搜索入选商品" placeholder="搜索商品名称或编号" value={query} onChange={e=>{setQuery(e.target.value);setPage(0)}}/>
+  const [query,setQuery]=useState(''),[page,setPage]=useState(0),[filter,setFilter]=useState('全部')
+  const status=(p:ReportProduct)=>p.aiReading?.route==='review'?'待复核':p.aiReading?.route==='observe'?'观察':p.aiReading?'已分析':'初筛入选'
+  const filters=['全部',...new Set(r.items.map(status))]
+  const rows=r.items.filter(p=>(filter==='全部'||status(p)===filter)&&(p.title+' '+p.id).toLowerCase().includes(query.trim().toLowerCase()))
+  return <section className="erp-list"><header className="selection-controls"><div>{filters.map(f=><button key={f} aria-pressed={filter===f} onClick={()=>{setFilter(f);setPage(0)}}>{f} {f==='全部'?r.items.length:r.items.filter(p=>status(p)===f).length}</button>)}</div><input aria-label="搜索入选商品" placeholder="搜索商品名称或编号" value={query} onChange={e=>{setQuery(e.target.value);setPage(0)}}/></header>
+  <div className="selection-columns"><span>商品 / 来源</span><span>累计销量</span><span>Amazon 报价</span><span>判断 / 入选依据</span></div>
   {rows.slice(page*25,page*25+25).map(p=>{
     const prices=(p.amazonPriceScreen?.candidates ?? p.amazonComparison?.candidates ?? []).flatMap(c=>c.price!=null && c.price>0?[c.price]:[])
-    return <details key={p.id}><summary>{p.thumbnail ? <img src={p.thumbnail} loading="lazy" alt="" referrerPolicy="no-referrer"/> : <span className="erp-thumb">商品</span>}
-      <div><b>{p.title}</b><small>{p.id.startsWith('amazon:')?'Amazon':'Temu'} · 累计销量 {amount(p.sold)} · Amazon {prices.length?money(Math.min(...prices)):'待核价'}</small>
-      <span>{p.reason || p.selectionBasis}</span></div><em>{p.aiReading?.route==='review'?'待复核':p.aiReading?.route==='observe'?'观察':p.aiReading?'已分析':'初筛入选'}</em></summary><ProductEvidence p={p} r={r}/></details>
+    const note=(p.reason||p.selectionBasis).split('〕').at(-1)?.trim()||p.selectionBasis
+    return <details key={p.id}><summary className="selection-line"><div className="identity">{p.thumbnail ? <img src={p.thumbnail} alt="" referrerPolicy="no-referrer"/> : <span className="erp-thumb">商品</span>}<div><b title={p.title}>{p.title}</b><small>{p.id.startsWith('amazon:')?'Amazon':'Temu'} · 美国站</small></div></div>
+    <strong className="sold"><i>累计销量 </i>{amount(p.sold)}</strong><strong className="quote"><i>Amazon </i>{prices.length?money(Math.min(...prices)):'待核价'}</strong>
+    <div className="judgement"><em data-review={status(p)==='待复核'}>{status(p)}</em><span title={note}>{note}</span></div><span className="chev">›</span></summary><ProductEvidence p={p} r={r}/></details>
   })}{!rows.length && <p>没有匹配的商品</p>}{rows.length>25 && <div className="erp-pages"><button disabled={!page} onClick={()=>setPage(page-1)}>上一页</button> {page+1} / {Math.ceil(rows.length/25)} <button disabled={(page+1)*25>=rows.length} onClick={()=>setPage(page+1)}>下一页</button></div>}</section>
 }
 function ReportView({ r, related }: { r: AdminReport; related?: AdminReport }) {
   const selection = r.kind === 'selection'
   return (
-    <div className="rp">
+    <div className={selection?'rp selection-sheet':'rp'}>
       <div className="rp-nav">
         <BackLink href={archiveUrl} label="返回管理员日报档案" />
         {related && (
