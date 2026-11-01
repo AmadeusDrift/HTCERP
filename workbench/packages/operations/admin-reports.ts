@@ -34,6 +34,10 @@ export interface ReportProduct {
   evidence: string
 }
 export interface AdminReport {
+  expansion?: {
+    day:string; seeds:number; hits:number; unique:number; priced:number; low:number; middle:number
+    shortlist:{asin:string;title:string;price:number;shipping:number|null}[]
+  }
   exclusions?: { reason: string; n: number }[]
   kind: 'selection' | 'tracking'
   day: string

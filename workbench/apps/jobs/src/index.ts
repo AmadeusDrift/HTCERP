@@ -1,5 +1,6 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloudflare:workers'
 import { screenReportProduct } from './report-price-screen'
+import { expandedScreen, type Seed } from './expanded-screen'
 import { runAmazonComparison } from '../../../packages/operations/amazon-comparison'
 import {
   activeContext,
@@ -16,10 +17,11 @@ import type { OpsBindings } from '../../../packages/operations/model'
 import { Stop } from '../../../packages/operations/providers'
 import { advanceQueue } from '../../../packages/operations/queue'
 
-type WorkflowInput = { runId: string; reportScreen?: { productId: string; query: string } }
+type WorkflowInput = { runId: string; reportScreen?: { productId: string; query: string }; expandSeeds?:Seed[] }
 export class ResearchWorkflow extends WorkflowEntrypoint<OpsBindings, WorkflowInput> {
   async run(event: WorkflowEvent<WorkflowInput>, step: WorkflowStep) {
     const id = event.payload.runId
+    if(event.payload.expandSeeds) return expandedScreen(this.env,id,event.payload.expandSeeds,step)
     const screen = event.payload.reportScreen
     if (screen) return step.do('screen-archived-product', { retries: { limit: 2, delay: '20 seconds' } }, () =>
       screenReportProduct(this.env, id, screen.productId, screen.query))

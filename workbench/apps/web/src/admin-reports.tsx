@@ -390,6 +390,12 @@ function ReportView({ r, related }: { r: AdminReport; related?: AdminReport }) {
         </div>
       </header>
       {selection && <SelectionOverview r={r} />}
+      {selection && r.expansion && <section className="rp-chart erp-summary"><h2>Amazon 扩筛 · {r.expansion.day}</h2>
+        <p>{r.expansion.seeds} 款来源商品 → {r.expansion.hits} 条检索结果 → 去重后 {r.expansion.unique} 个 ASIN，取得 {r.expansion.priced} 个有效报价。</p>
+        <p>低于 $4：{r.expansion.low} 款　·　$4 至不足 $6：{r.expansion.middle} 款</p>
+        {!!r.expansion.shortlist.length && <details><summary>查看低于 $6 的价格候选</summary>
+        {r.expansion.shortlist.map(c=><div className="rp-screen-row" key={c.asin}><a href={'https://www.amazon.com/dp/'+c.asin} target="_blank" rel="noreferrer" title={c.title}>{c.title}</a><b>{money(c.price)}</b></div>)}
+        </details>}<small>按商品价初筛，运费另计。是否同款及 Haul 归属需核实。</small></section>}
       {!selection && <Summary r={r} />}
       <div className="rp-section-title">
         <div>
