@@ -30,6 +30,11 @@
       "binding": "RUNNER",
       "name": "selection-run",
       "class_name": "ResearchWorkflow"
+    },
+    {
+      "binding": "ASSISTANT_RUNNER",
+      "name": "selection-assistant",
+      "class_name": "AssistantWorkflow"
     }
   ]
 }

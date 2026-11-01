@@ -54,7 +54,7 @@ const homeItem = { url: '/home', name: '首页', icon: House }
 const performanceItem = { url: '/performance', name: '业绩表', icon: Table2 }
 const settingsItem = { url: '/settings', name: '设置', icon: Settings2 }
 function Shell() {
-  const { path } = useLocation(),
+  const { path, params } = useLocation(),
     go = useGo(),
     [open, setOpen] = useState(false),
     [selectionOpen, setSelectionOpen] = useState(true),
@@ -182,7 +182,16 @@ function Shell() {
         </main>
       </div>
       {s.data && (
-        <OperationsAssistant key={s.data.id + path} page={current.name} path={path} session={s.data} />
+        <OperationsAssistant
+          key={s.data.id}
+          page={path.startsWith('/products/') ? '商品详情' : current.name}
+          path={path}
+          filters={
+            ['/', '/potential', '/candidates'].includes(path) ? Object.fromEntries(params) : undefined
+          }
+          jobId={path === '/tasks' ? params.get('id') || undefined : undefined}
+          session={s.data}
+        />
       )}
       {help && (
         <Dialog title="关于海天城ERP" onClose={() => setHelp(false)}>

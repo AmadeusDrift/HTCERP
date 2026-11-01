@@ -170,7 +170,9 @@ for (const [name, width, height] of screens) {
     test('已研究商品补查、切换候选并查看原始目录证据', async ({ page }) => {
       const writes = await mockApi(page)
       await page.goto('/daily?view=preview&kind=selection&run=' + report.runId)
+      await page.locator('.erp-list > details > summary').filter({ hasText: '挂钩' }).click()
       await expect(page.getByText(/本轮未对这件商品开展 AI 研究/)).toBeVisible()
+      await page.locator('.erp-list > details > summary').filter({ hasText: product.title_cn }).click()
       await expect(page.getByRole('button', { name: '补查 Amazon' })).toHaveCount(1)
       expect(writes).toEqual([])
       await page.getByRole('button', { name: '补查 Amazon' }).click()

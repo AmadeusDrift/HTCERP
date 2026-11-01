@@ -15,6 +15,11 @@ export const turnSchema = z
       .regex(/^data:image\/jpeg;base64,[A-Za-z0-9+/]+={0,2}$/)
       .optional(),
     page: z.string().max(40),
+    filters: z
+      .record(z.string().max(50), z.string().max(300))
+      .refine((v) => Object.keys(v).length <= 40)
+      .optional(),
+    jobId: z.uuid().optional(),
     productId: z
       .string()
       .regex(/^(?:amazon:US:[A-Z0-9]{10}|(?:temu|shein|tiktok|aliexpress):US:\d{1,32})$/)
@@ -31,8 +36,10 @@ export interface ChatTurn {
   hasImage: number
   createdAt: string
   page: string
-  hasPlan?:number
-  jobId?:string|null
+  hasPlan?: number
+  runId?: string | null
+  runStatus?: string | null
+  jobId?: string | null
 }
 export interface Conversation {
   id: string
@@ -84,7 +91,8 @@ export function budgetCheck(db: D1Database, directKey?: string) {
 }
 
 export async function workspaceContext(db: D1Database, input: TurnInput) {
-  if (!input.productId) return JSON.stringify({ page: input.page })
+  if (!input.productId)
+    return JSON.stringify({ page: input.page, filters: input.filters, jobId: input.jobId })
   const product = await db
     .prepare(`SELECT id,substr(COALESCE(NULLIF(title_cn,''),title),1,180) title,
     min_price,max_price,currency,total_sold,day_sold,week_sold,rating,review_count,updated_at
@@ -99,7 +107,13 @@ export async function workspaceContext(db: D1Database, input: TurnInput) {
         .bind('product-reviews/v1/US/temu/' + input.productId.split(':')[2])
         .first()
     : null
-  return JSON.stringify({ page: '商品详情 · ' + input.productId, product, review })
+  return JSON.stringify({
+    page: '商品详情 · ' + input.productId,
+    product,
+    review,
+    filters: input.filters,
+    jobId: input.jobId,
+  })
 }
 
 const system =

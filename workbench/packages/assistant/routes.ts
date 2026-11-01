@@ -3,8 +3,10 @@ import { z } from 'zod'
 import type { AppEnv } from '../../apps/api/src/bindings'
 import { providerCredentials } from '../connections/credentials'
 import { PublicError } from '../contracts/errors'
-import { models, parse } from '../operations/model'
+import { createJob } from '../operations/jobs'
+import { currentStrategy, models, parse } from '../operations/model'
 import { charged, sendRequest } from '../operations/providers'
+import { agentTools, planSchema, runAgentTool } from './agent'
 import {
   budgetCheck,
   budgetIssue,
@@ -18,18 +20,16 @@ import {
   workspaceContext,
 } from './model'
 import { dailyTasks } from './tasks'
-import { agentTools, planSchema, runAgentTool } from './agent'
-import { createJob } from '../operations/jobs'
-import { currentStrategy } from '../operations/model'
 
 const noModel = '运营助手尚未连接 AI 模型，请联系管理员完成配置。'
 const noAccount = '请先创建并登录工作账号，再使用个人对话。'
 const pageSize = 25
 const projection = `id,question,answer,
-  CASE WHEN answer IS NULL AND issue IS NULL AND created_at<strftime('%Y-%m-%dT%H:%M:%fZ','now','-3 minutes')
+  CASE WHEN answer IS NULL AND issue IS NULL AND json_extract(context_json,'$.runId') IS NULL AND created_at<strftime('%Y-%m-%dT%H:%M:%fZ','now','-3 minutes')
     THEN '回复中断，可以重新提问。' ELSE issue END issue,
   image_url IS NOT NULL hasImage,created_at createdAt,json_extract(context_json,'$.page') page,
-  json_type(context_json,'$.plan') IS NOT NULL hasPlan,json_extract(context_json,'$.jobId') jobId`
+  json_type(context_json,'$.plan') IS NOT NULL hasPlan,json_extract(context_json,'$.jobId') jobId,json_extract(context_json,'$.runId') runId,
+  (SELECT status FROM assistant_runs WHERE id=json_extract(context_json,'$.runId')) runStatus`
 async function owner(db: D1Database, id: string, accountId: string) {
   if (
     !(await db
@@ -122,7 +122,8 @@ assistantRoutes.post('/conversations/:id/turns', async (c) => {
       .prepare(`INSERT INTO assistant_turns(conversation_id,id,question,context_json,image_url,created_at)
       SELECT ?1,?2,?3,?4,?5,?6 WHERE EXISTS(SELECT 1 FROM assistant_conversations WHERE id=?1 AND account_id=?7)
         AND NOT EXISTS(SELECT 1 FROM assistant_turns WHERE conversation_id=?1
-        AND answer IS NULL AND issue IS NULL AND created_at>strftime('%Y-%m-%dT%H:%M:%fZ','now','-3 minutes'))
+        AND answer IS NULL AND issue IS NULL AND (created_at>strftime('%Y-%m-%dT%H:%M:%fZ','now','-3 minutes')
+        OR EXISTS(SELECT 1 FROM assistant_runs WHERE id=json_extract(context_json,'$.runId') AND status IN ('queued','running','pausing','cancelling'))))
       ON CONFLICT(conversation_id,id) DO NOTHING`)
       .bind(id, input.id, input.question, context, image, time, actor.id),
   ])
@@ -138,88 +139,140 @@ assistantRoutes.post('/conversations/:id/turns', async (c) => {
     issue: string | null = null,
     reserved = false,
     cost: number | null = null
-  let updatedContext=context
-  const applyTool=async(name:string,args:unknown)=>{
-    const result=await runAgentTool(c.env,actor,name,args)
-    answer=result.answer
-    updatedContext=JSON.stringify({...JSON.parse(context),plan:result.plan,jobId:result.jobId})
+  let toolOutput = ''
+  let updatedContext = context
+  const applyTool = async (name: string, args: unknown) => {
+    const result = await runAgentTool(c.env, actor, name, args)
+    answer = result.answer
+    toolOutput = result.data ? JSON.stringify(result.data) : result.answer
+    updatedContext = JSON.stringify({ ...JSON.parse(context), plan: result.plan, jobId: result.jobId })
   }
   try {
-    const simple=/^(查|在线找)\s*(Temu|Amazon)\s+(.+?)[，,]\s*(\d+(?:\.\d+)?)\s*美元以内[，,]\s*销量至少\s*(\d+)\s*件(?:[，,]\s*(\d+)\s*页)?[。！]?$/i.exec(input.question)
-    if(!image && /^(查|查看)我的任务[。！]?$/.test(input.question)) await applyTool('my_jobs',{})
-    else if(!image && simple){
-      const [,action,platform,term,price,sold,pages]=simple
-      const home=platform.toLowerCase()==='temu' && term.trim()==='家居'
-      const filters={platform:platform.toLowerCase(),keyword:home?'':term.trim(),category:home?'home':'all',maxPrice:Number(price),minSold:Number(sold)}
-      await applyTool(action==='查'?'search_inventory':'prepare_discovery',action==='查'?filters:{...filters,mode:'live',pages:Number(pages??1)})
-    }else{
-    const router = await providerCredentials(c.env, 'openrouter')
-    const key = router.credentials.OPENROUTER_API_KEY
-    if (!key) issue = noModel
-    else {
-      const messages:unknown[] = await buildMessages(db, id, input, context, image)
-      reserved = !!(await budgetCheck(db, directKey))
-      if (!reserved) issue = budgetIssue
-      else {
-        const ask = () => sendRequest(
-          new Request('https://openrouter.ai/api/v1/chat/completions', {
-            method: 'POST',
-            redirect: 'manual',
-            signal: AbortSignal.timeout(60000),
-            headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              model: models.research,
-              reasoning: { effort: 'minimal' },
-              max_tokens: 1000,
-              provider: { max_price: { prompt: 1, completion: 5 } },
-              messages,
-              tools:agentTools,
-              tool_choice:'auto',
-              parallel_tool_calls:false,
-            }),
-          }),
-          c.env.OPENROUTER_US,
-        )
-        const result=await ask()
-        cost = charged(result, 'micros')
-        if (result.status === 200) {
-          const toolReply=z.object({choices:z.array(z.object({message:z.object({tool_calls:z.array(z.object({id:z.string(),type:z.literal('function'),function:z.object({name:z.string(),arguments:z.string()})})).length(1)})}))})
-          const call=toolReply.safeParse(result.body)
-          if(call.success && call.data.choices[0]){
-            const calls=call.data.choices[0].message.tool_calls, fn=calls[0].function
-            await applyTool(fn.name,JSON.parse(fn.arguments))
-            // One bounded follow-up lets the agent use real findings to propose the next step.
-            const followKey=directKey+':follow'
-            if(fn.name!=='prepare_discovery' && cost!==null && await budgetCheck(db,followKey)){
-              let followCost:number|null=null
-              try{
-                messages.push({role:'assistant',content:null,tool_calls:calls},{role:'tool',tool_call_id:calls[0].id,content:answer})
-                const follow=await ask()
-                followCost=charged(follow,'micros')
-                if(follow.status===200){
-                  const more=toolReply.safeParse(follow.body)
-                  const next=more.success?more.data.choices[0]?.message.tool_calls[0].function:undefined
-                  const facts=answer
-                  if(next && next.name!==fn.name){await applyTool(next.name,JSON.parse(next.arguments));answer=facts+'\n\n'+answer}
-                  else if(!next){const interpretation=replyFrom(follow.body,key);if(interpretation) answer=facts+'\n\n'+interpretation}
-                }
-              }finally{
-                await db.prepare("UPDATE usage_reservations SET actual=?,state=? WHERE direct_key=? AND step_key='reply'")
-                  .bind(followCost,followCost===null?'uncertain':'confirmed',followKey).run()
-              }
-            }
-          }else answer = replyFrom(result.body, key)
-        }
-        if (!answer) issue = '模型暂时无法回复，请稍后重新提问。'
+    const simple =
+      /^(查|在线找)\s*(Temu|Amazon)\s+(.+?)[，,]\s*(\d+(?:\.\d+)?)\s*美元以内[，,]\s*销量至少\s*(\d+)\s*件(?:[，,]\s*(\d+)\s*页)?[。！]?$/i.exec(
+        input.question,
+      )
+    if (!image && /^(查|查看)我的任务[。！]?$/.test(input.question)) await applyTool('my_jobs', {})
+    else if (!image && simple) {
+      const [, action, platform, term, price, sold, pages] = simple
+      const home = platform.toLowerCase() === 'temu' && term.trim() === '家居'
+      const filters = {
+        platform: platform.toLowerCase(),
+        keyword: home ? '' : term.trim(),
+        category: home ? 'home' : 'all',
+        maxPrice: Number(price),
+        minSold: Number(sold),
       }
-    }
+      await applyTool(
+        action === '查' ? 'search_inventory' : 'prepare_discovery',
+        action === '查' ? filters : { ...filters, mode: 'live', pages: Number(pages ?? 1) },
+      )
+    } else {
+      const router = await providerCredentials(c.env, 'openrouter')
+      const key = router.credentials.OPENROUTER_API_KEY
+      if (!key) issue = noModel
+      else {
+        const messages: unknown[] = await buildMessages(db, id, input, context, image)
+        reserved = !!(await budgetCheck(db, directKey))
+        if (!reserved) issue = budgetIssue
+        else {
+          const ask = () =>
+            sendRequest(
+              new Request('https://openrouter.ai/api/v1/chat/completions', {
+                method: 'POST',
+                redirect: 'manual',
+                signal: AbortSignal.timeout(60000),
+                headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  model: models.research,
+                  reasoning: { effort: 'minimal' },
+                  max_tokens: 1000,
+                  provider: { max_price: { prompt: 1, completion: 5 } },
+                  messages,
+                  tools: agentTools,
+                  tool_choice: 'auto',
+                  parallel_tool_calls: false,
+                }),
+              }),
+              c.env.OPENROUTER_US,
+            )
+          const result = await ask()
+          cost = charged(result, 'micros')
+          if (result.status === 200) {
+            const toolReply = z.object({
+              choices: z.array(
+                z.object({
+                  message: z.object({
+                    tool_calls: z
+                      .array(
+                        z.object({
+                          id: z.string(),
+                          type: z.literal('function'),
+                          function: z.object({ name: z.string(), arguments: z.string() }),
+                        }),
+                      )
+                      .length(1),
+                  }),
+                }),
+              ),
+            })
+            const call = toolReply.safeParse(result.body)
+            if (call.success && call.data.choices[0]) {
+              const calls = call.data.choices[0].message.tool_calls,
+                fn = calls[0].function
+              await applyTool(fn.name, JSON.parse(fn.arguments))
+              // One bounded follow-up lets the agent use real findings to propose the next step.
+              const followKey = directKey + ':follow'
+              if (
+                fn.name !== 'prepare_discovery' &&
+                cost !== null &&
+                (await budgetCheck(db, followKey))
+              ) {
+                let followCost: number | null = null
+                try {
+                  messages.push(
+                    { role: 'assistant', content: null, tool_calls: calls },
+                    { role: 'tool', tool_call_id: calls[0].id, content: toolOutput },
+                  )
+                  const follow = await ask()
+                  followCost = charged(follow, 'micros')
+                  if (follow.status === 200) {
+                    const more = toolReply.safeParse(follow.body)
+                    const next = more.success
+                      ? more.data.choices[0]?.message.tool_calls[0].function
+                      : undefined
+                    const facts = answer
+                    if (next) {
+                      await applyTool(next.name, JSON.parse(next.arguments))
+                      answer = facts + '\n\n' + answer
+                    } else if (!next) {
+                      const interpretation = replyFrom(follow.body, key)
+                      if (interpretation) answer = facts + '\n\n' + interpretation
+                    }
+                  }
+                } finally {
+                  await db
+                    .prepare(
+                      "UPDATE usage_reservations SET actual=?,state=? WHERE direct_key=? AND step_key='reply'",
+                    )
+                    .bind(followCost, followCost === null ? 'uncertain' : 'confirmed', followKey)
+                    .run()
+                }
+              }
+            } else answer = replyFrom(result.body, key)
+          }
+          if (!answer) issue = '模型暂时无法回复，请稍后重新提问。'
+        }
+      }
     }
   } catch (err) {
     issue = err instanceof PublicError ? err.message : '这次未能取得模型回复，请稍后重新提问。'
   }
   const save = db
-    .prepare('UPDATE assistant_turns SET answer=?,issue=?,context_json=? WHERE conversation_id=? AND id=?')
-    .bind(answer, issue, updatedContext,id, input.id)
+    .prepare(
+      'UPDATE assistant_turns SET answer=?,issue=?,context_json=? WHERE conversation_id=? AND id=?',
+    )
+    .bind(answer, issue, updatedContext, id, input.id)
   if (reserved)
     await db.batch([
       save,
@@ -232,21 +285,53 @@ assistantRoutes.post('/conversations/:id/turns', async (c) => {
   else await save.run()
   return c.json(await stored())
 })
-assistantRoutes.post('/conversations/:id/turns/:turn/run',async c=>{
-  const actor=c.var.actor,db=c.env.DB,{id,turn}=c.req.param()
-  if(actor.local||actor.role==='viewer') throw new PublicError('FORBIDDEN','当前账号不能创建任务。',403)
-  await owner(db,id,actor.id)
-  const row=await db.prepare('SELECT context_json FROM assistant_turns WHERE conversation_id=? AND id=?').bind(id,turn).first<{context_json:string}>()
-  if(!row) throw missing()
-  const ctx=JSON.parse(row.context_json)
-  if(ctx.jobId) return c.json({id:ctx.jobId})
-  const p=planSchema.parse(ctx.plan)
-  const cap=p.mode==='live'?10*p.pages:0
-  if(cap>(await currentStrategy(db)).settings.dataDailyPoints) throw new PublicError('BUDGET_LIMIT','团队每日数据预算低于本次计划上限，请缩减页数或调整预算。',409)
-  const job=await createJob(c.env,{kind:'discovery',requestId:'agent-'+id+'-'+turn,inputs:{
-    platform:p.platform,keyword:p.keyword,categoryId:p.category==='home'?'home':'',mode:p.mode,maxPrice:p.maxPrice,
-    tiers:[p.minSold],pageLimit:p.pages,maxDataPoints:cap,maxAiMicros:0,goal:'助手选品 · '+(p.keyword||p.category==='home'&&'家居'||p.platform),
-  }},actor.email)
-  await db.prepare("UPDATE assistant_turns SET context_json=json_set(context_json,'$.jobId',?) WHERE conversation_id=? AND id=?").bind(job.id,id,turn).run()
+assistantRoutes.post('/conversations/:id/turns/:turn/run', async (c) => {
+  const actor = c.var.actor,
+    db = c.env.DB,
+    { id, turn } = c.req.param()
+  if (actor.local || actor.role === 'viewer')
+    throw new PublicError('FORBIDDEN', '当前账号不能创建任务。', 403)
+  await owner(db, id, actor.id)
+  const row = await db
+    .prepare('SELECT context_json FROM assistant_turns WHERE conversation_id=? AND id=?')
+    .bind(id, turn)
+    .first<{ context_json: string }>()
+  if (!row) throw missing()
+  const ctx = JSON.parse(row.context_json)
+  if (ctx.jobId) return c.json({ id: ctx.jobId })
+  const p = planSchema.parse(ctx.plan)
+  const cap = p.mode === 'live' ? 10 * p.pages : 0
+  if (cap > (await currentStrategy(db)).settings.dataDailyPoints)
+    throw new PublicError(
+      'BUDGET_LIMIT',
+      '团队每日数据预算低于本次计划上限，请缩减页数或调整预算。',
+      409,
+    )
+  const job = await createJob(
+    c.env,
+    {
+      kind: 'discovery',
+      requestId: 'agent-' + id + '-' + turn,
+      inputs: {
+        platform: p.platform,
+        keyword: p.keyword,
+        categoryId: p.category === 'home' ? 'home' : '',
+        mode: p.mode,
+        maxPrice: p.maxPrice,
+        tiers: [p.minSold],
+        pageLimit: p.pages,
+        maxDataPoints: cap,
+        maxAiMicros: 0,
+        goal: '助手选品 · ' + (p.keyword || (p.category === 'home' && '家居') || p.platform),
+      },
+    },
+    actor.email,
+  )
+  await db
+    .prepare(
+      "UPDATE assistant_turns SET context_json=json_set(context_json,'$.jobId',?) WHERE conversation_id=? AND id=?",
+    )
+    .bind(job.id, id, turn)
+    .run()
   return c.json(job)
 })

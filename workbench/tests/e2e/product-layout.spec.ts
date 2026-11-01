@@ -53,7 +53,20 @@ async function sampleData(page: Page) {
         json: {
           ...list,
           categories: [],
-          items: [{ ...product, grade: 'watch', daySold: 1, weekSold: 15 }],
+          items: [
+            {
+              id: product.id,
+              title: product.title,
+              thumbnail: null,
+              category: '家居 / 收纳',
+              price: product.min_price,
+              listed: '2026-10-17',
+              observed: '2026-10-31',
+              grade: 'watch',
+              daySold: 1,
+              weekSold: 15,
+            },
+          ],
         },
       })
     if (path === '/api/daily')
@@ -138,10 +151,13 @@ for (const [name, width, height] of screens) {
       if (phone) await aligned(page)
       await page.getByRole('button', { name: '列表视图' }).click()
       await clamped(page.locator('.candidate-list .product-cell b').first())
-      for (const path of ['/potential', '/daily']) {
-        await page.goto(path)
-        await clamped(page.locator('.daily-product').first())
-      }
+      await page.goto('/potential')
+      const potentialTitle = page.locator('.potential-copy b').first()
+      await expect(potentialTitle).toHaveText(longTitle)
+      await expect(potentialTitle).toHaveCSS('text-overflow', 'ellipsis')
+      expect(await potentialTitle.evaluate((el) => el.scrollWidth > el.clientWidth)).toBe(true)
+      await page.goto('/daily')
+      await clamped(page.locator('.daily-product').first())
     })
   })
 }

@@ -6,6 +6,7 @@ import { convertV4MiniflareOptions, Miniflare } from 'miniflare'
 import { unstable_splitSqlQuery as splitSQL } from 'wrangler'
 
 const calls = []
+let assistantModelCalls = 0
 const { publicKey, privateKey } = await generateKeyPair('RS256')
 const issuer = 'https://fixture.cloudflareaccess.com'
 const jwk = { ...(await exportJWK(publicKey)), kid: 'fixture-key', alg: 'RS256' }
@@ -111,6 +112,37 @@ async function fixture(request) {
     const body = await request.json()
     assert.equal(body.model, 'openai/gpt-6.1-terra')
     const state = JSON.parse(body.messages[1].content)
+    if (Array.isArray(state.observations)) {
+      assistantModelCalls++
+      if (state.goal === 'runtime-cancel' || state.goal === 'runtime-pause') await delay(250)
+      const number = state.observations.length
+      const action =
+        number === 0
+          ? { type: 'tool', name: 'search_inventory', args: { platform: 'temu' } }
+          : number === 1
+            ? { type: 'tool', name: 'read_product', args: { productId: 'temu:US:1' } }
+            : number === 2
+              ? { type: 'tool', name: 'read_product', args: { productId: 'temu:US:2' } }
+              : {
+                  type: 'report',
+                  report: {
+                    summary: '持久调查已完成缓存比较。',
+                    recommendations: [
+                      {
+                        productId: 'temu:US:1',
+                        reason: '来源快照记录价格 4 USD、累计销量 50000；规格仍需人工核对。',
+                        evidenceIds: [state.observations[1].result.evidence[0].id],
+                      },
+                    ],
+                    excluded: [],
+                    missing: ['未在线补查，利润未知'],
+                  },
+                }
+      return Response.json({
+        choices: [{ message: { content: JSON.stringify(action) } }],
+        usage: { cost: 0.00001 },
+      })
+    }
     assert.equal(state.products[0].id, 'temu:US:1')
     assert.equal(state.products[0].min_price, 4)
     assert.equal(state.products[0].total_sold, 50000)
@@ -149,6 +181,7 @@ const shared = {
   outboundService: fixture,
 }
 const binding = { name: 'fixture-run', className: 'ResearchWorkflow' }
+const assistantBinding = { name: 'fixture-assistant', className: 'AssistantWorkflow' }
 const mf = new Miniflare(
   convertV4MiniflareOptions({
     workers: [
@@ -157,14 +190,17 @@ const mf = new Miniflare(
         name: 'api',
         scriptPath: '.local/dry-api/index.js',
         bindings: { LOCAL_DEVELOPMENT: '1', CONNECTIONS_KEY: 'cd'.repeat(32) },
-        workflows: { RUNNER: { ...binding, scriptName: 'jobs' } },
+        workflows: {
+          RUNNER: { ...binding, scriptName: 'jobs' },
+          ASSISTANT_RUNNER: { ...assistantBinding, scriptName: 'jobs' },
+        },
       },
       {
         ...shared,
         name: 'jobs',
         scriptPath: '.local/dry-jobs/index.js',
         bindings: { CONNECTIONS_KEY: 'cd'.repeat(32) },
-        workflows: { RUNNER: binding },
+        workflows: { RUNNER: binding, ASSISTANT_RUNNER: assistantBinding },
       },
       {
         ...shared,
@@ -176,7 +212,10 @@ const mf = new Miniflare(
           ACCESS_AUD: 'fixture-app',
           APP_ROLES: '{"owner@example.test":"admin","reader@example.test":"viewer"}',
         },
-        workflows: { RUNNER: { ...binding, scriptName: 'jobs' } },
+        workflows: {
+          RUNNER: { ...binding, scriptName: 'jobs' },
+          ASSISTANT_RUNNER: { ...assistantBinding, scriptName: 'jobs' },
+        },
       },
     ],
   }),
@@ -350,6 +389,105 @@ try {
   assert.equal((await json('/strategy', {}, readerCookie)).status, 403)
   assert.equal((await json('/me/preferences', { view: 'grid', pageSize: 50 }, readerCookie)).status, 200)
   assert.equal((await json('/jobs', {}, readerCookie)).status, 403)
+  const conversationId = crypto.randomUUID(),
+    originTurn = crypto.randomUUID()
+  const investigationInput = { id: originTurn, question: 'runtime-compare', page: '商品库' }
+  const createInvestigation = () =>
+    json(
+      '/assistant/conversations/' + conversationId + '/investigations',
+      investigationInput,
+      readerCookie,
+    )
+  const submitted = await createInvestigation()
+  assert.equal(submitted.status, 200, await submitted.clone().text())
+  const investigation = await submitted.json()
+  assert.equal((await (await createInvestigation()).json()).runId, investigation.runId)
+  async function assistantUntil(id, states) {
+    for (let i = 0; i < 200; i++) {
+      const row = await db.prepare('SELECT * FROM assistant_runs WHERE id=?').bind(id).first()
+      if (states.includes(row.status)) return row
+      await delay(100)
+    }
+    throw new Error('Assistant workflow did not reach ' + states.join('/') + ': ' + id)
+  }
+  // No browser remains attached after submission: D1/R2 and Workflow own progress.
+  const investigated = await assistantUntil(investigation.runId, ['succeeded', 'partial', 'failed'])
+  assert.equal(investigated.status, 'succeeded', JSON.stringify(investigated))
+  assert.equal(investigated.model_steps, 4)
+  assert.equal(investigated.tool_steps, 3)
+  assert.equal(assistantModelCalls, 4)
+  const persistedReport = JSON.parse(investigated.report_json)
+  assert.equal(persistedReport.recommendations[0].productId, 'temu:US:1')
+  assert.equal(persistedReport.usage.aiMicros, 40)
+  const assistantSteps = await db
+    .prepare('SELECT * FROM assistant_steps WHERE run_id=? ORDER BY seq')
+    .bind(investigation.runId)
+    .all()
+  assert.equal(assistantSteps.results.length, 7)
+  for (const modelStep of assistantSteps.results.filter((s) => s.kind === 'model'))
+    assert.ok(await bucket.head(modelStep.evidence_ref))
+  const transcript = await (await memberGet('/assistant/conversations/' + conversationId)).json()
+  assert.match(transcript.items[0].answer, /temu:US:1/)
+  assert.equal((await (await createInvestigation()).json()).runId, investigation.runId)
+  assert.equal(assistantModelCalls, 4)
+  async function controlledInvestigation(goal) {
+    const response = await json(
+      '/assistant/conversations/' + crypto.randomUUID() + '/investigations',
+      { id: crypto.randomUUID(), question: goal, page: '商品库' },
+      readerCookie,
+    )
+    assert.equal(response.status, 200, await response.clone().text())
+    const createdRun = await response.json()
+    for (let i = 0; i < 100; i++) {
+      if (
+        await db
+          .prepare("SELECT 1 FROM assistant_steps WHERE run_id=? AND status='sending'")
+          .bind(createdRun.runId)
+          .first()
+      )
+        return createdRun
+      await delay(20)
+    }
+    throw new Error('Expected in-flight assistant request')
+  }
+  const pausedRun = await controlledInvestigation('runtime-pause')
+  assert.equal(
+    (
+      await (
+        await json('/assistant/investigations/' + pausedRun.runId + '/pause', {}, readerCookie)
+      ).json()
+    ).status,
+    'pausing',
+  )
+  await assistantUntil(pausedRun.runId, ['paused'])
+  const resumed = await json(
+    '/assistant/investigations/' + pausedRun.runId + '/resume',
+    {},
+    readerCookie,
+  )
+  assert.equal(resumed.status, 200, await resumed.clone().text())
+  const resumedRun = await assistantUntil(pausedRun.runId, ['succeeded', 'partial', 'failed'])
+  assert.equal(resumedRun.status, 'succeeded', JSON.stringify(resumedRun))
+  assert.equal(resumedRun.attempt, 2)
+  assert.equal(resumedRun.model_steps, 4)
+  const cancelledRun = await controlledInvestigation('runtime-cancel')
+  assert.equal(
+    (
+      await (
+        await json('/assistant/investigations/' + cancelledRun.runId + '/cancel', {}, readerCookie)
+      ).json()
+    ).status,
+    'cancelling',
+  )
+  const cancelled = await assistantUntil(cancelledRun.runId, ['cancelled'])
+  assert.equal(cancelled.model_steps, 1)
+  assert.equal(cancelled.tool_steps, 0)
+  const cancelledUsage = await db
+    .prepare('SELECT state,actual FROM usage_reservations WHERE assistant_run_id=?')
+    .bind(cancelledRun.runId)
+    .all()
+  assert.deepEqual(cancelledUsage.results, [{ state: 'confirmed', actual: 10 }])
+  assert.ok(JSON.parse(cancelled.report_json).missing.length)
   assert.equal(
     (await json('/accounts/' + viewer.id, { active: false }, ownerCookie, 'PATCH')).status,
     200,
@@ -359,7 +497,7 @@ try {
     401,
   )
   console.log(
-    'Workerd fixture passed: API → Workflow → D1/R2, three tiers, Decisions → Amazon US → Terra, confirmed usage.',
+    'Workerd fixture passed: research and cached AssistantWorkflow, owned original-turn report, duplicate submission, pause/resume, cancellation, D1/R2 and confirmed usage.',
   )
 } finally {
   await mf.dispose()

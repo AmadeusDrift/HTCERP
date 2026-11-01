@@ -193,6 +193,23 @@ dialog.oa-dialog {
 .oa-tools {
   justify-content: space-between;
 }
+.oa-investigation,
+.oa-investigation-start {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+.oa-investigation-start small {
+  color: #596b76;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.oa-investigation-start button {
+  white-space: normal;
+}
+.oa-investigation button {
+  min-height: 44px;
+}
 .oa-preview {
   display: flex;
   align-items: center;

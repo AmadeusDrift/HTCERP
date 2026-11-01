@@ -5,21 +5,22 @@ import { bodyLimit } from 'hono/body-limit'
 import { HTTPException } from 'hono/http-exception'
 import { z } from 'zod'
 import { comparisons } from '../../../packages/amazon/routes'
+import { investigationRoutes } from '../../../packages/assistant/investigation-routes'
 import { assistantRoutes } from '../../../packages/assistant/routes'
 import { catalog } from '../../../packages/catalog'
+import { reviewRoutes } from '../../../packages/connections/reviews'
 import { connections } from '../../../packages/connections/routes'
 import { positions } from '../../../packages/contracts/accounts'
 import { PublicError } from '../../../packages/contracts/errors'
 import { memberDiagnostic } from '../../../packages/contracts/presentation'
-import { operationsRoutes } from '../../../packages/operations/routes'
-import { dailyRoutes } from '../../../packages/operations/daily'
 import { adminReportRoutes } from '../../../packages/operations/admin-reports'
+import { dailyRoutes } from '../../../packages/operations/daily'
+import { operationsRoutes } from '../../../packages/operations/routes'
 import { personalRoutes } from '../../../packages/personal/routes'
-import { storeSalesRoutes } from '../../../packages/store-sales/routes'
 import { images } from '../../../packages/research-images/routes'
+import { storeSalesRoutes } from '../../../packages/store-sales/routes'
 import { type Actor, accessRole, requiredRole } from './access'
 import { sessionActor } from './account-session'
-import { reviewRoutes } from '../../../packages/connections/reviews'
 import { accountRoutes, guardWrite, publicAuth } from './accounts'
 import type { AppEnv } from './bindings'
 
@@ -58,7 +59,8 @@ const small = sizeLimit(16 * 1024),
   imageLimit = sizeLimit(220_000)
 const chatLimit = sizeLimit(244_000)
 app.use('/api/*', (c, next) => {
-  if (/^\/api\/assistant\/conversations\/[\w-]+\/turns$/.test(c.req.path)) return chatLimit(c, next)
+  if (/^\/api\/assistant\/conversations\/[\w-]+\/(?:turns|investigations)$/.test(c.req.path))
+    return chatLimit(c, next)
   return (c.req.path === '/api/research-images' ? imageLimit : small)(c, next)
 })
 app.route('/api', publicAuth)
@@ -97,6 +99,7 @@ app.use('/api/*', async (c, next) => {
 })
 app.route('/api', accountRoutes)
 app.route('/api/assistant', assistantRoutes)
+app.route('/api/assistant', investigationRoutes)
 app.route('/api/me', personalRoutes)
 app.get('/api/session', (c) => c.json(c.var.actor))
 app.all('/api/rpc/*', async (c) => {

@@ -1,6 +1,6 @@
+export { AssistantWorkflow } from './assistant-workflow'
+
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloudflare:workers'
-import { screenReportProduct } from './report-price-screen'
-import { expandedScreen, type Seed } from './expanded-screen'
 import { runAmazonComparison } from '../../../packages/operations/amazon-comparison'
 import {
   activeContext,
@@ -16,15 +16,23 @@ import { runSchedule } from '../../../packages/operations/jobs'
 import type { OpsBindings } from '../../../packages/operations/model'
 import { Stop } from '../../../packages/operations/providers'
 import { advanceQueue } from '../../../packages/operations/queue'
+import { expandedScreen, type Seed } from './expanded-screen'
+import { screenReportProduct } from './report-price-screen'
 
-type WorkflowInput = { runId: string; reportScreen?: { productId: string; query: string }; expandSeeds?:Seed[] }
+type WorkflowInput = {
+  runId: string
+  reportScreen?: { productId: string; query: string }
+  expandSeeds?: Seed[]
+}
 export class ResearchWorkflow extends WorkflowEntrypoint<OpsBindings, WorkflowInput> {
   async run(event: WorkflowEvent<WorkflowInput>, step: WorkflowStep) {
     const id = event.payload.runId
-    if(event.payload.expandSeeds) return expandedScreen(this.env,id,event.payload.expandSeeds,step)
+    if (event.payload.expandSeeds) return expandedScreen(this.env, id, event.payload.expandSeeds, step)
     const screen = event.payload.reportScreen
-    if (screen) return step.do('screen-archived-product', { retries: { limit: 2, delay: '20 seconds' } }, () =>
-      screenReportProduct(this.env, id, screen.productId, screen.query))
+    if (screen)
+      return step.do('screen-archived-product', { retries: { limit: 2, delay: '20 seconds' } }, () =>
+        screenReportProduct(this.env, id, screen.productId, screen.query),
+      )
     const data = await step.do('load-pinned-strategy-v1', async () => {
       const context = await activeContext(this.env, id, event.instanceId)
       if (!context) return null

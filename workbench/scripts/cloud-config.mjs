@@ -29,7 +29,12 @@ for (const unit of units) {
   config.name = prefix ? (unit === 'api' ? prefix : prefix + '-jobs') : config.name + '-' + stage
   Object.assign(config.d1_databases[0], { database_name: databaseName, database_id: databaseId })
   config.r2_buckets[0].bucket_name = bucket
-  config.workflows[0].name = prefix ? prefix + '-run' : config.workflows[0].name + '-' + stage
+  for (const flow of config.workflows) {
+    flow.name = prefix
+      ? prefix + (flow.binding === 'ASSISTANT_RUNNER' ? '-assistant' : '-run')
+      : flow.name + '-' + stage
+    if (unit === 'api') flow.script_name = prefix ? prefix + '-jobs' : 'selection-jobs-' + stage
+  }
   if (unit === 'jobs') config.triggers = { crons: [] }
   if (unit === 'api') {
     config.workflows[0].script_name = prefix

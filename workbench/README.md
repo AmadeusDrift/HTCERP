@@ -1,5 +1,7 @@
 # 自动选品工作台
 
+AI Agent / Super Agent 的已确认方向、阶段范围和验收标准见[分阶段实施方案](docs/AI-Agent-Super-Agent分阶段实施方案.md)，后续开发使用[工程执行清单](../docs/superpowers/plans/2026-11-01-htcerp-super-agent.md)。第一、第二阶段已实现：在运营助手中选择“开始调查（已有资料）”，可基于缓存连续调查、查看进度、暂停/继续/取消并读取报告。调查使用现有 AI 预算，不触发在线采集；在线补查留在第三阶段。
+
 在本机查看 [商品发现](http://127.0.0.1:8787/)，或打开 [Temu 美国家居首轮筛选](http://127.0.0.1:8787/?platform=temu&category=temu%3A9711&maxPrice=4&tier=50k)。本地入口需要开发服务运行。
 
 云端使用 [工作台登录页](https://xuanpin.gy1207981728.workers.dev/login)。所有者第一次打开[管理员开户页](https://xuanpin.gy1207981728.workers.dev/api/auth/setup)，验证邮箱后设置自己的用户名和密码，再在工作台给成员分配账号和角色。

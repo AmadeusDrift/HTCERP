@@ -1,4 +1,4 @@
-import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
+import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   ArrowLeft,
   ArrowUp,
@@ -22,6 +22,169 @@ const base = '/assistant/conversations/'
 type Panel = 'chat' | 'history' | 'tasks'
 type Thread = { id: string; saved: boolean }
 const fresh = (): Thread => ({ id: crypto.randomUUID(), saved: false })
+type AssistantContext = {
+  page: string
+  path: string
+  filters?: Record<string, string>
+  jobId?: string
+  session: Session
+}
+type Investigation = {
+  id: string
+  status: string
+  modelSteps: number
+  toolSteps: number
+  summary?: string | null
+  answer?: string | null
+  report?: {
+    recommendations: { productId: string }[]
+    excluded: { productId: string }[]
+    linkedJobs?: { jobId: string }[]
+    coverage?: { products: number; tools: number }
+  } | null
+  usage?: { dataPoints: number; aiMicros: number; unconfirmedAiMicros: number }
+  limits?: { aiMicros: number }
+}
+const finished = new Set(['cancelled', 'succeeded', 'partial', 'failed'])
+const runLabels: Record<string, string> = {
+  queued: '等待调查',
+  running: '正在调查',
+  waiting_jobs: '等待任务',
+  awaiting_confirmation: '等待确认',
+  awaiting_input: '等待补充信息',
+  pausing: '正在暂停',
+  paused: '已暂停',
+  cancelling: '正在取消',
+  cancelled: '已取消',
+  succeeded: '调查完成',
+  partial: '部分完成',
+  failed: '调查失败',
+}
+
+function InvestigationCard({
+  runId,
+  answer,
+  close,
+}: {
+  runId: string
+  answer: string | null
+  close: () => void
+}) {
+  const cache = useQueryClient()
+  const key = ['assistant-investigation', runId]
+  const result = useQuery({
+    queryKey: key,
+    queryFn: () => request<Investigation>('/assistant/investigations/' + encodeURIComponent(runId)),
+    retry: false,
+    refetchOnMount: 'always',
+    refetchInterval: (query) =>
+      query.state.data && finished.has(query.state.data.status) ? false : 3000,
+  })
+  const [busy, setBusy] = useState(false),
+    [error, setError] = useState('')
+  const run = result.data
+  const products = [
+    ...new Set(
+      [...(run?.report?.recommendations ?? []), ...(run?.report?.excluded ?? [])].map(
+        (item) => item.productId,
+      ),
+    ),
+  ].filter((id) => /^(?:amazon:US:[A-Z0-9]{10}|(?:temu|shein|tiktok|aliexpress):US:\d{1,32})$/.test(id))
+  const jobs = [...new Set((run?.report?.linkedJobs ?? []).map((item) => item.jobId))].filter((id) =>
+    /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(id),
+  )
+  async function control(action: 'pause' | 'resume' | 'cancel') {
+    if (busy) return
+    setBusy(true)
+    setError('')
+    try {
+      const updated = await request<Investigation>(
+        '/assistant/investigations/' + encodeURIComponent(runId) + '/' + action,
+        {},
+      )
+      cache.setQueryData(key, updated)
+      await cache.invalidateQueries({ queryKey: ['assistant-transcript'] })
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '调查状态未更新，请重试。')
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <section className="oa-investigation" aria-label="调查进度">
+      {result.isPending ? (
+        <Loading />
+      ) : result.isError ? (
+        <ErrorBox error={result.error} retry={() => void result.refetch()} />
+      ) : (
+        run && (
+          <>
+            <b>{runLabels[run.status] ?? '调查状态待更新'}</b>
+            <small>
+              模型 {run.modelSteps} 步 · 工具 {run.toolSteps} 步
+            </small>
+            {run.report?.coverage && (
+              <small>
+                调查覆盖 {run.report.coverage.products} 款商品 · {run.report.coverage.tools} 次读取
+              </small>
+            )}
+            {run.usage && (
+              <small>
+                数据积分 {run.usage.dataPoints} · AI 已计费及预留 $
+                {(run.usage.aiMicros / 1000000).toFixed(6)}
+                {run.limits ? ' / $' + (run.limits.aiMicros / 1000000).toFixed(6) : ''}
+              </small>
+            )}
+            {!!run.usage?.unconfirmedAiMicros && (
+              <small>其中未确认预留 ${(run.usage.unconfirmedAiMicros / 1000000).toFixed(6)}</small>
+            )}
+            {run.summary && <p>{run.summary}</p>}
+            {(answer || run.answer) && <p>{answer || run.answer}</p>}
+            {products.map((id) => (
+              <PageLink key={id} href={'/products/' + encodeURIComponent(id)} onClick={close}>
+                查看商品 {id}
+              </PageLink>
+            ))}
+            {jobs.map((id) => (
+              <PageLink key={id} href={'/tasks?id=' + encodeURIComponent(id)} onClick={close}>
+                查看关联任务 {id}
+              </PageLink>
+            ))}
+            {!finished.has(run.status) && (
+              <div className="inline wrap">
+                {run.status === 'paused' ? (
+                  <button type="button" disabled={busy} onClick={() => void control('resume')}>
+                    继续调查
+                  </button>
+                ) : (
+                  [
+                    'queued',
+                    'running',
+                    'waiting_jobs',
+                    'awaiting_input',
+                    'awaiting_confirmation',
+                  ].includes(run.status) && (
+                    <button type="button" disabled={busy} onClick={() => void control('pause')}>
+                      暂停调查
+                    </button>
+                  )
+                )}
+                <button
+                  type="button"
+                  disabled={busy || run.status === 'cancelling'}
+                  onClick={() => void control('cancel')}
+                >
+                  取消调查
+                </button>
+              </div>
+            )}
+          </>
+        )
+      )}
+      <ErrorBox error={error} />
+    </section>
+  )
+}
 
 function TaskPanel({ close }: { close: () => void }) {
   const today = new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10)
@@ -74,18 +237,20 @@ function AssistantDialog({
   path,
   session,
   close,
-}: {
-  page: string
-  path: string
-  session: Session
+  filters,
+  jobId,
+  selection,
+  setSelection,
+}: AssistantContext & {
   close: () => void
+  selection: Thread | null
+  setSelection: (thread: Thread) => void
 }) {
   const dialog = useRef<HTMLDialogElement>(null),
     scroll = useRef<HTMLDivElement>(null)
   const file = useRef<HTMLInputElement>(null),
     input = useRef<HTMLTextAreaElement>(null)
-  const [initial] = useState(fresh),
-    [selection, setSelection] = useState<Thread | null>(null)
+  const [initial] = useState(fresh)
   const [panel, setPanel] = useState<Panel>('chat'),
     [menu, setMenu] = useState(false)
   const [question, setQuestion] = useState(''),
@@ -96,9 +261,10 @@ function AssistantDialog({
   const sending = useRef(false),
     attempt = useRef(''),
     cache = useQueryClient()
-  const product = /^\/products\/(amazon(?:%3A|:)US(?:%3A|:)[A-Z0-9]{10}|(?:temu|shein|tiktok|aliexpress)(?:%3A|:)US(?:%3A|:)\d{1,32})$/i.exec(
-    path,
-  )
+  const product =
+    /^\/products\/(amazon(?:%3A|:)US(?:%3A|:)[A-Z0-9]{10}|(?:temu|shein|tiktok|aliexpress)(?:%3A|:)US(?:%3A|:)\d{1,32})$/i.exec(
+      path,
+    )
   const productId = product ? decodeURIComponent(product[1]) : undefined
   const label = productId ? '商品详情 · ' + productId : page
   const historyKey = ['assistant-history', session.id]
@@ -123,12 +289,17 @@ function AssistantDialog({
       request<Transcript>(base + active.id + (pageParam ? '?before=' + pageParam : '')),
     getNextPageParam: (last) => (last.more ? last.items[0].id : undefined),
     refetchInterval: (q) =>
-      q.state.data?.pages[0].items.some((v) => !v.answer && !v.issue) ? 3000 : false,
+      q.state.data?.pages[0].items.some((v) =>
+        v.runId ? !finished.has(v.runStatus ?? '') : !v.answer && !v.issue,
+      )
+        ? 3000
+        : false,
   })
   const turns = [...(transcript.data?.pages ?? [])].reverse().flatMap((p) => p.items)
   if (pending && !turns.some((v) => v.id === pending.id)) turns.push(pending)
   const latest = turns.at(-1)
-  const waiting = !!pending || (!!latest && !latest.answer && !latest.issue)
+  const waiting = !!pending || (!!latest && !latest.runId && !latest.answer && !latest.issue)
+  const investigating = turns.some((turn) => turn.runId && !finished.has(turn.runStatus ?? ''))
   const inactive = history.data?.pages[0]?.unavailable
   const disabled =
     waiting ||
@@ -181,8 +352,9 @@ function AssistantDialog({
       setUploading(false)
     }
   }
-  async function send() {
+  async function send(investigation = false) {
     if (disabled || sending.current || (!question.trim() && !picture)) return
+    if (investigation && (investigating || picture || !question.trim())) return
     sending.current = true
     const id = attempt.current || crypto.randomUUID()
     attempt.current = id
@@ -201,13 +373,18 @@ function AssistantDialog({
     setError('')
     setMenu(false)
     try {
-      const turn = await request<ChatTurn>(base + threadId + '/turns', {
-        id,
-        question,
-        image: picture || undefined,
-        page,
-        productId,
-      })
+      const turn = await request<ChatTurn>(
+        base + threadId + (investigation ? '/investigations' : '/turns'),
+        {
+          id,
+          question,
+          ...(investigation ? {} : { image: picture || undefined }),
+          page,
+          productId,
+          filters,
+          jobId,
+        },
+      )
       cache.setQueryData<{ pages: Transcript[]; pageParams: string[] }>(turnKey, (old) => {
         const pages = [...(old?.pages ?? [{ items: [], more: false }])]
         pages[0] = { ...pages[0], items: [...pages[0].items.filter((v) => v.id !== turn.id), turn] }
@@ -333,7 +510,12 @@ function AssistantDialog({
         ) : (
           <>
             <div className="oa-context">
-              当前页面 <span>{label}</span>
+              当前页面{' '}
+              <span>
+                {label}
+                {jobId ? ' · ' + jobId : ''}
+                {filters && Object.keys(filters).length ? ' · 已带入当前筛选' : ''}
+              </span>
             </div>
             <div
               className="oa-messages"
@@ -367,8 +549,24 @@ function AssistantDialog({
                       ? '可以问这件商品的销量、评价或选品思路。'
                       : '可以查商品库、安排选品任务，也可以上传商品图。'}
                   </p>
-                  <div className="inline wrap">{['查 Temu 家居，4 美元以内，销量至少 10 件','在线找 Temu 家居，4 美元以内，销量至少 10 件，10 页','查看我的任务'].map(example=>
-                    <button type="button" key={example} onClick={()=>{setQuestion(example);input.current?.focus()}}>{example}</button>)}</div>
+                  <div className="inline wrap">
+                    {[
+                      '查 Temu 家居，4 美元以内，销量至少 10 件',
+                      '在线找 Temu 家居，4 美元以内，销量至少 10 件，10 页',
+                      '查看我的任务',
+                    ].map((example) => (
+                      <button
+                        type="button"
+                        key={example}
+                        onClick={() => {
+                          setQuestion(example)
+                          input.current?.focus()
+                        }}
+                      >
+                        {example}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               )}
               {turns.map((turn) => (
@@ -389,15 +587,41 @@ function AssistantDialog({
                   </div>
                   <div className="oa-bubble">
                     <small>运营助手</small>
-                    <p>{turn.answer || turn.issue || '正在回复…'}</p>
-                    {turn.hasPlan && !turn.jobId ? <button type="button" disabled={waiting||sending.current} onClick={async()=>{
-                      if(sending.current)return
-                      sending.current=true
-                      try{await request(base+active.id+'/turns/'+turn.id+'/run',{});await transcript.refetch();setError('')}
-                      catch(e){setError(e instanceof Error?e.message:'任务未创建')}
-                      finally{sending.current=false}
-                    }}>按此计划运行</button>:null}
-                    {turn.jobId && <PageLink className="btn" href={'/tasks?id='+encodeURIComponent(turn.jobId)} onClick={close}>查看任务进度与结果</PageLink>}
+                    {turn.runId ? (
+                      <InvestigationCard runId={turn.runId} answer={turn.answer} close={close} />
+                    ) : (
+                      <p>{turn.answer || turn.issue || '正在回复…'}</p>
+                    )}
+                    {turn.hasPlan && !turn.jobId ? (
+                      <button
+                        type="button"
+                        disabled={waiting || sending.current}
+                        onClick={async () => {
+                          if (sending.current) return
+                          sending.current = true
+                          try {
+                            await request(base + active.id + '/turns/' + turn.id + '/run', {})
+                            await transcript.refetch()
+                            setError('')
+                          } catch (e) {
+                            setError(e instanceof Error ? e.message : '任务未创建')
+                          } finally {
+                            sending.current = false
+                          }
+                        }}
+                      >
+                        按此计划运行
+                      </button>
+                    ) : null}
+                    {turn.jobId && (
+                      <PageLink
+                        className="btn"
+                        href={'/tasks?id=' + encodeURIComponent(turn.jobId)}
+                        onClick={close}
+                      >
+                        查看任务进度与结果
+                      </PageLink>
+                    )}
                   </div>
                 </div>
               ))}
@@ -451,6 +675,16 @@ function AssistantDialog({
                   }
                 }}
               />
+              <div className="oa-investigation-start">
+                <button
+                  type="button"
+                  disabled={disabled || investigating || !!picture || !question.trim()}
+                  onClick={() => void send(true)}
+                >
+                  开始调查（已有资料）
+                </button>
+                <small>仅使用已有资料；消耗 AI 额度，不产生数据积分。</small>
+              </div>
               <div className="oa-tools">
                 <input
                   type="file"
@@ -489,8 +723,9 @@ function AssistantDialog({
     </dialog>
   )
 }
-export function OperationsAssistant(props: { page: string; path: string; session: Session }) {
+export function OperationsAssistant(props: AssistantContext) {
   const [open, setOpen] = useState(false)
+  const [selection, setSelection] = useState<Thread | null>(null)
   return (
     <>
       <button
@@ -502,7 +737,14 @@ export function OperationsAssistant(props: { page: string; path: string; session
         <MessageSquareText />
         运营助手
       </button>
-      {open && <AssistantDialog {...props} close={() => setOpen(false)} />}
+      {open && (
+        <AssistantDialog
+          {...props}
+          selection={selection}
+          setSelection={setSelection}
+          close={() => setOpen(false)}
+        />
+      )}
     </>
   )
 }

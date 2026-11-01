@@ -2,6 +2,7 @@
   "entry": [
     "apps/api/src/index.ts",
     "apps/jobs/src/index.ts",
+    "apps/openrouter/src/index.ts",
     "apps/web/src/main.tsx",
     "packages/catalog/bootstrap-cli.mjs",
     "scripts/*.mjs",

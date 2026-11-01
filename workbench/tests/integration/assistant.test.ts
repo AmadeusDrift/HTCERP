@@ -51,6 +51,10 @@ beforeEach(() => {
       },
       all: () => ({ results: s.all(...values) }),
       run: () => ({ meta: s.run(...values) }),
+      execute: () => ({
+        results: s.all(...values),
+        meta: { changes: Number(db.prepare('SELECT changes() AS n').get()?.n ?? 0) },
+      }),
     }
   }
   DB = {
@@ -58,7 +62,7 @@ beforeEach(() => {
     batch: (stmts: ReturnType<typeof prepare>[]) => {
       db.exec('BEGIN')
       try {
-        const out = stmts.map((s) => s.run())
+        const out = stmts.map((s) => s.execute())
         db.exec('COMMIT')
         return out
       } catch (e) {
@@ -86,41 +90,90 @@ function req(suffix: string, token = owner, body?: unknown, extra: Partial<Bindi
   )
 }
 const input = (question = '问题') => ({ id: crypto.randomUUID(), question, page: '发现商品' })
-it('uses inventory tools without model credit and protects confirmed job plans',async()=>{
-  db.prepare("INSERT INTO products(id,platform,market,external_id,title,category_id,currency,min_price,total_sold) VALUES('temu:US:15','temu','US','15','厨房纸架','9711','USD',3.99,100)").run()
-  const lookup=await req(path+'/turns',owner,input('查 Temu 家居，4 美元以内，销量至少 10 件'))
-  expect(await lookup.json()).toMatchObject({answer:expect.stringContaining('厨房纸架')})
+it('uses inventory tools without model credit and protects confirmed job plans', async () => {
+  db.prepare(
+    "INSERT INTO products(id,platform,market,external_id,title,category_id,currency,min_price,total_sold) VALUES('temu:US:15','temu','US','15','厨房纸架','9711','USD',3.99,100)",
+  ).run()
+  const lookup = await req(path + '/turns', owner, input('查 Temu 家居，4 美元以内，销量至少 10 件'))
+  expect(await lookup.json()).toMatchObject({ answer: expect.stringContaining('厨房纸架') })
   db.prepare("UPDATE accounts SET role='operator' WHERE id='alice'").run()
-  const turn=input('在线找 Temu 家居，4 美元以内，销量至少 10 件，10 页')
-  const plan=await req(path+'/turns',owner,turn)
-  expect(await plan.json()).toMatchObject({hasPlan:1,answer:expect.stringContaining('100 积分')})
-  expect((await req(path+'/turns/'+turn.id+'/run',owner,{})).status).toBe(409)
-  expect((await req(path+'/turns/'+turn.id+'/run',other,{})).status).toBe(403)
+  const turn = input('在线找 Temu 家居，4 美元以内，销量至少 10 件，10 页')
+  const plan = await req(path + '/turns', owner, turn)
+  expect(await plan.json()).toMatchObject({ hasPlan: 1, answer: expect.stringContaining('100 积分') })
+  expect((await req(path + '/turns/' + turn.id + '/run', owner, {})).status).toBe(409)
+  expect((await req(path + '/turns/' + turn.id + '/run', other, {})).status).toBe(403)
   expect(db.prepare('SELECT count(*) n FROM job_runs').get()?.n).toBe(0)
   expect(relay).not.toHaveBeenCalled()
 })
-it('lets the model select a real tool and feeds observed results back to it',async()=>{
+it('lets the model select a real tool and feeds observed results back to it', async () => {
   budget(100000)
-  relay.mockResolvedValueOnce(Response.json({choices:[{message:{tool_calls:[{id:'tool-1',type:'function',function:{name:'my_jobs',arguments:'{}'}}]}}],usage:{cost:0.00001}}))
-  const turn=await req(path+'/turns',owner,input('刚才我的选品调查做完了吗'))
-  expect(await turn.json()).toMatchObject({answer:expect.stringContaining('你还没有选品任务')})
-  const payload=await relay.mock.calls[1][0].json() as {messages:{role:string;content:string}[]}
-  expect(payload.messages.at(-1)).toMatchObject({role:'tool',content:'你还没有选品任务。'})
+  relay.mockResolvedValueOnce(
+    Response.json({
+      choices: [
+        {
+          message: {
+            tool_calls: [
+              { id: 'tool-1', type: 'function', function: { name: 'my_jobs', arguments: '{}' } },
+            ],
+          },
+        },
+      ],
+      usage: { cost: 0.00001 },
+    }),
+  )
+  const turn = await req(path + '/turns', owner, input('刚才我的选品调查做完了吗'))
+  expect(await turn.json()).toMatchObject({ answer: expect.stringContaining('你还没有选品任务') })
+  const payload = (await relay.mock.calls[1][0].json()) as {
+    messages: { role: string; content: string }[]
+  }
+  expect(payload.messages.at(-1)?.role).toBe('tool')
+  expect(JSON.parse(payload.messages.at(-1)!.content)).toMatchObject({
+    version: 1,
+    status: 'empty',
+    data: { items: [] },
+  })
   expect((await usage(DB)).aiMicros).toBe(20)
 })
-it('creates a confirmed cache discovery exactly once and returns its real run id',async()=>{
+it('creates a confirmed cache discovery exactly once and returns its real run id', async () => {
   budget(100000)
   db.prepare("UPDATE accounts SET role='operator' WHERE id='alice'").run()
-  const turn=input('帮我在库存里建一个选品计划')
-  const args={platform:'temu',keyword:'',category:'home',maxPrice:4,minSold:10,pages:1,mode:'cache'}
-  relay.mockResolvedValueOnce(Response.json({choices:[{message:{tool_calls:[{id:'q',type:'function',function:{name:'prepare_discovery',arguments:JSON.stringify(args)}}]}}],usage:{cost:0.00001}}))
-  expect(await (await req(path+'/turns',owner,turn)).json()).toMatchObject({hasPlan:1})
-  const confirm=()=>req(path+'/turns/'+turn.id+'/run',owner,{})
-  const first=await confirm()
+  const turn = input('帮我在库存里建一个选品计划')
+  const args = {
+    platform: 'temu',
+    keyword: '',
+    category: 'home',
+    maxPrice: 4,
+    minSold: 10,
+    pages: 1,
+    mode: 'cache',
+  }
+  relay.mockResolvedValueOnce(
+    Response.json({
+      choices: [
+        {
+          message: {
+            tool_calls: [
+              {
+                id: 'q',
+                type: 'function',
+                function: { name: 'prepare_discovery', arguments: JSON.stringify(args) },
+              },
+            ],
+          },
+        },
+      ],
+      usage: { cost: 0.00001 },
+    }),
+  )
+  expect(await (await req(path + '/turns', owner, turn)).json()).toMatchObject({ hasPlan: 1 })
+  const confirm = () => req(path + '/turns/' + turn.id + '/run', owner, {})
+  const first = await confirm()
   expect(first.status).toBe(200)
-  const job=await first.json() as {id:string}
-  expect(await (await confirm()).json()).toMatchObject({id:job.id})
-  expect(db.prepare('SELECT actor,status FROM job_runs').all()).toEqual([{actor:'alice',status:'succeeded'}])
+  const job = (await first.json()) as { id: string }
+  expect(await (await confirm()).json()).toMatchObject({ id: job.id })
+  expect(db.prepare('SELECT actor,status FROM job_runs').all()).toEqual([
+    { actor: 'alice', status: 'succeeded' },
+  ])
 })
 it('authenticates, keeps account transcripts and images private, and reuses actual turns when continuing a chat', async () => {
   budget(200000)
@@ -228,4 +281,60 @@ it('filters progress to the selected team daily selection task and reports actua
     task: { id: 't', status: 'running', selected: 1 },
   })
   expect(await (await req('/daily-tasks?date=2022-01-01')).json()).toMatchObject({ task: null })
+})
+
+it('starts an owned cached investigation once and exposes only its owner controls', async () => {
+  budget(500000)
+  const launches = vi.fn(async () => ({ id: 'workflow' }))
+  const binding = { ASSISTANT_RUNNER: { create: launches } } as unknown as Partial<Bindings>
+  const turn = input('调查已有商品并给我报告')
+  const started = await req(path + '/investigations', owner, turn, binding)
+  expect(started.status).toBe(200)
+  const body = (await started.json()) as ChatRun
+  expect(body.runId).toBeTruthy()
+  expect((await req(path + '/investigations', owner, turn, binding)).status).toBe(200)
+  expect(launches).toHaveBeenCalledTimes(1)
+  expect((await req('/investigations/' + body.runId, other)).status).toBe(404)
+  expect((await req('/investigations/' + body.runId, owner)).status).toBe(200)
+  expect((await req('/investigations/' + body.runId + '/cancel', other, {})).status).toBe(404)
+  expect((await req('/investigations/' + body.runId + '/cancel', owner, {})).status).toBe(200)
+  expect(relay).not.toHaveBeenCalled()
+})
+type ChatRun = { runId: string }
+
+it('reads two different products through repeated tool names in bounded chat', async () => {
+  budget(200000)
+  for (const [id, title] of [
+    ['21', '第一款纸架'],
+    ['22', '第二款纸架'],
+  ])
+    db.prepare(
+      "INSERT INTO products(id,platform,market,external_id,title,currency,min_price,total_sold) VALUES(?,'temu','US',?,?,'USD',3,100)",
+    ).run('temu:US:' + id, id, title)
+  for (const id of ['21', '22'])
+    relay.mockResolvedValueOnce(
+      Response.json({
+        choices: [
+          {
+            message: {
+              tool_calls: [
+                {
+                  id: 'call-' + id,
+                  type: 'function',
+                  function: {
+                    name: 'read_product',
+                    arguments: JSON.stringify({ productId: 'temu:US:' + id }),
+                  },
+                },
+              ],
+            },
+          },
+        ],
+        usage: { cost: 0.00001 },
+      }),
+    )
+  const response = await req(path + '/turns', owner, input('比较两款纸架'))
+  const body = (await response.json()) as { answer: string }
+  expect(body.answer).toContain('第一款纸架')
+  expect(body.answer).toContain('第二款纸架')
 })

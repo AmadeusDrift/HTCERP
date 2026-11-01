@@ -35,6 +35,12 @@
       "name": "selection-run",
       "class_name": "ResearchWorkflow",
       "script_name": "selection-jobs"
+    },
+    {
+      "binding": "ASSISTANT_RUNNER",
+      "name": "selection-assistant",
+      "class_name": "AssistantWorkflow",
+      "script_name": "selection-jobs"
     }
   ]
 }
