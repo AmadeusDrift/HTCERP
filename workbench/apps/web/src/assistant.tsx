@@ -133,7 +133,6 @@ function AssistantDialog({
   const disabled =
     waiting ||
     uploading ||
-    !!inactive ||
     history.isPending ||
     history.isError ||
     (active.saved && transcript.isPending)
@@ -362,12 +361,14 @@ function AssistantDialog({
               {!turns.length && !history.isPending && !(active.saved && transcript.isPending) && (
                 <div className="oa-empty">
                   <MessageSquareText />
-                  <h3>想聊点什么？</h3>
+                  <h3>这次想找什么商品？</h3>
                   <p>
                     {productId
                       ? '可以问这件商品的销量、评价或选品思路。'
-                      : '可以问选品问题，也可以上传一张商品图一起看。'}
+                      : '可以查商品库、安排选品任务，也可以上传商品图。'}
                   </p>
+                  <div className="inline wrap">{['查 Temu 家居，4 美元以内，销量至少 10 件','在线找 Temu 家居，4 美元以内，销量至少 10 件，10 页','查看我的任务'].map(example=>
+                    <button type="button" key={example} onClick={()=>{setQuestion(example);input.current?.focus()}}>{example}</button>)}</div>
                 </div>
               )}
               {turns.map((turn) => (
@@ -389,6 +390,14 @@ function AssistantDialog({
                   <div className="oa-bubble">
                     <small>运营助手</small>
                     <p>{turn.answer || turn.issue || '正在回复…'}</p>
+                    {turn.hasPlan && !turn.jobId ? <button type="button" disabled={waiting||sending.current} onClick={async()=>{
+                      if(sending.current)return
+                      sending.current=true
+                      try{await request(base+active.id+'/turns/'+turn.id+'/run',{});await transcript.refetch();setError('')}
+                      catch(e){setError(e instanceof Error?e.message:'任务未创建')}
+                      finally{sending.current=false}
+                    }}>按此计划运行</button>:null}
+                    {turn.jobId && <PageLink className="btn" href={'/tasks?id='+encodeURIComponent(turn.jobId)} onClick={close}>查看任务进度与结果</PageLink>}
                   </div>
                 </div>
               ))}
@@ -402,7 +411,7 @@ function AssistantDialog({
             >
               {inactive && (
                 <p className="oa-note" role="status">
-                  {inactive}
+                  {inactive} 仍可使用上面的示例查库或查看自己的任务。
                 </p>
               )}
               <ErrorBox error={error} />

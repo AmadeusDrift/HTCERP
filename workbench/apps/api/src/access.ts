@@ -25,6 +25,7 @@ export function requiredRole(method: string, path: string): Role {
   if (/^\/api\/(?:accounts|connections)(?:\/|$)/.test(path)) return 'admin'
   if (method === 'GET' || method === 'HEAD') return 'viewer'
   if (method === 'POST' && /^\/api\/assistant\/conversations\/[\da-f-]{36}\/turns$/i.test(path)) return 'viewer'
+  if (method === 'POST' && /^\/api\/assistant\/conversations\/[\da-f-]{36}\/turns\/[\da-f-]{36}\/run$/i.test(path)) return 'operator'
   if (
     method === 'POST' &&
     /^\/api\/me\/(?:preferences|presets(?:\/[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\/(?:rename|delete))?)$/i.test(
