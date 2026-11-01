@@ -411,7 +411,7 @@ export async function discoverPage(c: Context, page: number, ids: string[]): Pro
     const asins = [...new Set(accepted.map(row => String(row.goodsId)))]
     try {
       const { credentials } = await providerCredentials(c.env, 'amazon')
-      const offers = await new AmazonUS(credentials).batchOffers(asins.slice(0,20))
+      const offers = await new AmazonUS(credentials, undefined, c.env.DB).batchOffers(asins.slice(0,20))
       for (const asin of asins) {
         const offer = offers.get(asin)
         quotes.push({ asin, price: offer?.price ?? null, shipping: offer?.shipping ?? null,

@@ -211,7 +211,7 @@ export async function compareAmazonProduct(
   if (query) {
     try {
       const { credentials } = await providerCredentials(env, 'amazon')
-      const api = new AmazonUS(credentials)
+      const api = new AmazonUS(credentials, undefined, env.DB)
       const queries = [...new Set([query, terms.fallbackQuery].filter((v): v is string => !!v))]
       result.queries = []
       for (const keyword of queries) {

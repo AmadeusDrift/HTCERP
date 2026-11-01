@@ -3,6 +3,7 @@ import { DatabaseSync, type SQLInputValue } from 'node:sqlite'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { compareAmazonProduct } from '../../packages/amazon/auto-compare'
+import { acquireSlot, observeLimit } from '../../packages/amazon/request-pacing'
 import { comparisonTerms, qualify } from '../../packages/amazon/comparison-terms'
 import type { ConnectionBindings } from '../../packages/connections/credentials'
 
@@ -25,6 +26,7 @@ beforeEach(() => {
     '0004_review_consistency',
     '0009_connection_credentials',
     '0019_amazon_auto_comparisons',
+    '0021_amazon_request_pacing',
   ])
     sql.exec(readFileSync('migrations/' + name + '.sql', 'utf8'))
   sql
@@ -62,6 +64,18 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals()
   sql.close()
+})
+it('paces simultaneous callers per operation and shares stricter Amazon limits',async()=>{
+  const sent=await Promise.all([1,2,3].map(async()=>{await acquireSlot(env.DB,'catalog');return Date.now()}))
+  sent.sort((a,b)=>a-b)
+  expect(sent[1]-sent[0]).toBeGreaterThanOrEqual(600)
+  expect(sent[2]-sent[1]).toBeGreaterThanOrEqual(600)
+  await acquireSlot(env.DB,'batch')
+  await observeLimit(env.DB,'batch',new Headers({'x-amzn-RateLimit-Limit':'0.05','retry-after':'60'}),true)
+  const pace=sql.prepare("SELECT interval_ms,next_at,slow_until FROM amazon_request_pacing WHERE operation='batch'").get()!
+  expect(pace.interval_ms).toBe(25000)
+  expect(Number(pace.next_at)-Date.now()).toBeGreaterThan(59000)
+  expect(Number(pace.slow_until)-Date.now()).toBeGreaterThan(590000)
 })
 function item(n: number, title: string, pack: number) {
   const marketplaceId = 'ATVPDKIKX0DER'

@@ -91,7 +91,7 @@ connections.post('/connections/amazon/test', async (c) => {
   let status = 'catalog_verified'
   let failure: unknown
   try {
-    await new AmazonUS(credentials).test()
+    await new AmazonUS(credentials, undefined, c.env.DB).test()
   } catch (e) {
     failure = e
     status = e instanceof PublicError ? e.code : 'SOURCE_UNAVAILABLE'

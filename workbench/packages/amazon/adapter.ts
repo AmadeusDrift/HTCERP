@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { acquireSlot, observeLimit, pacedOperation } from './request-pacing'
 import { redactJson } from '../connections/credentials'
 import { PublicError } from '../contracts/errors'
 import { skuIsJit } from '../store-sales/report'
@@ -99,8 +100,11 @@ export class AmazonUS {
   constructor(
     private readonly secrets: AmazonSecrets,
     private readonly send: typeof fetch = (input, init) => fetch(input, init),
+    private readonly pacingDB?: D1Database,
   ) {}
   private async json(url: URL | string, init: RequestInit = {}): Promise<unknown> {
+    const operation = pacedOperation(url)
+    if (operation && this.pacingDB) await acquireSlot(this.pacingDB, operation)
     let response: Response
     try {
       response = await this.send(url, {
@@ -111,6 +115,7 @@ export class AmazonUS {
     } catch {
       throw new PublicError('SOURCE_UNAVAILABLE', 'Amazon 请求超时或连接失败。', 503, 'amazon', true)
     }
+    if (operation && this.pacingDB) await observeLimit(this.pacingDB, operation, response.headers, response.status === 429)
     if (!response.ok) throw sourceError(response.status)
     return response.json().catch(() => {
       throw invalid()
@@ -361,7 +366,10 @@ export class AmazonUS {
     })) }).parse(raw)
     const result = new Map<string, ReturnType<AmazonUS['parseOffer']>>()
     for (const row of batch.responses) {
-      if (row.status.statusCode === 429) throw sourceError(429)
+      if (row.status.statusCode === 429) {
+        if (this.pacingDB) await observeLimit(this.pacingDB,'batch',new Headers(),true)
+        throw sourceError(429)
+      }
       if (row.status.statusCode !== 200) continue
       const id = z.object({ payload: z.object({ ASIN: z.string() }) }).parse(row.body).payload.ASIN
       result.set(id, this.parseOffer(row.body))
