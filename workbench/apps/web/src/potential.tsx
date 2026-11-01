@@ -145,7 +145,7 @@ export function Potential() {
                       </td>
                       <td>
                         <span className="potential-label">日销量 / 近七天销量</span>{amount(p.daySold)} / {amount(p.weekSold)}
-                        <small className="potential-date">数据日期 {date(p.observed)}</small>
+                        <small className="potential-date">{date(p.observed)}</small>
                       </td>
                       <td>
                         <Badge tone={p.grade === 'priority' ? 'teal' : 'neutral'}>
