@@ -163,10 +163,14 @@ export function useAccess() {
     edit: ['admin', 'operator'].includes(s.data?.role || ''),
   }
 }
+export function PlatformInitial({id}:{id:string}) {
+  const name = platforms[id] || id
+  return <span className="platform-initial" data-platform={id} role="img" aria-label={'来源：'+name} title={name}>{name.charAt(0).toUpperCase()}</span>
+}
 export function Platform({ id }: { id: string }) {
   return (
     <span className={'platform ' + id}>
-      <i />
+      <PlatformInitial id={id}/>
       {platforms[id] || id}
     </span>
   )

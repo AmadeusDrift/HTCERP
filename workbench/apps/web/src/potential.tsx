@@ -19,6 +19,7 @@ import {
   productUrl,
   Title,
   Thumb,
+  PlatformInitial,
   useAccess,
   useData,
   useGo,
@@ -131,7 +132,7 @@ export function Potential() {
                           <Thumb p={p}/>
                           <span className="potential-copy">
                             <span className="potential-name">
-                              {p.id.startsWith('temu:') && <span className="potential-temu" role="img" aria-label="来源：Temu" title="Temu">T</span>}
+                              <PlatformInitial id={p.id.split(':')[0]}/>
                               <b>{p.title}</b>
                             </span>
                             <small>{p.category.split(' / ').at(-1)}</small>

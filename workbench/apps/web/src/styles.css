@@ -2739,3 +2739,9 @@ dialog::backdrop {
 }
 
 .dialog-inner > .panel-head > button[aria-label="关闭"] { border-radius: 12px; }
+.platform-initial{display:inline-grid;place-items:center;flex:0 0 18px;width:18px;height:18px;border-radius:4px;background:#566477;color:white;font:700 13px/1 Arial,sans-serif}
+.platform-initial[data-platform=temu]{background:#cc5000}
+.platform-initial[data-platform=amazon]{background:#232f3e;box-shadow:inset 0 -2px #ff9900}
+.platform-initial[data-platform=shein]{background:#151515}
+.platform-initial[data-platform=tiktok]{background:#111;box-shadow:inset 2px 0 #25f4ee,inset -2px 0 #fe2c55}
+.platform-initial[data-platform=aliexpress]{background:#cd1637}
