@@ -1,5 +1,6 @@
 import type { AmazonComparison } from '../amazon/auto-compare'
 import { AmazonUS } from '../amazon/adapter'
+import { dispatch } from './service-queue'
 import { haulPriceTier } from '../amazon/haul-price-tier'
 import { normalizeProduct } from '../catalog/facts'
 import { ingestGeekbi } from '../catalog/ingest'
@@ -141,6 +142,15 @@ export async function reserve(
   throw new Stop(unit === 'points' ? '积分预算不足，未发送此请求' : 'AI 金额预算不足，未发送此请求')
 }
 async function archived(
+  c:Context,key:string,unit:Unit,estimate:number,
+  request:Parameters<typeof archivedOnTurn>[4],
+) {
+  return dispatch(c.env.DB,unit==='points'?'geekbi':'ai',{owner:c.job.actor,runId:c.job.id,attempt:c.attempt},async()=>{
+    await stillActive(c)
+    return archivedOnTurn(c,key,unit,estimate,request)
+  })
+}
+async function archivedOnTurn(
   c: Context,
   logicalKey: string,
   unit: Unit,
@@ -411,7 +421,7 @@ export async function discoverPage(c: Context, page: number, ids: string[]): Pro
     const asins = [...new Set(accepted.map(row => String(row.goodsId)))]
     try {
       const { credentials } = await providerCredentials(c.env, 'amazon')
-      const offers = await new AmazonUS(credentials, undefined, c.env.DB).batchOffers(asins.slice(0,20))
+      const offers = await new AmazonUS(credentials, undefined, c.env.DB,{owner:c.job.actor,runId:c.job.id,attempt:c.attempt}).batchOffers(asins.slice(0,20))
       for (const asin of asins) {
         const offer = offers.get(asin)
         quotes.push({ asin, price: offer?.price ?? null, shipping: offer?.shipping ?? null,

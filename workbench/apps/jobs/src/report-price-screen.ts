@@ -8,7 +8,8 @@ export async function screenReportProduct(env: ConnectionBindings, runId: string
     WHERE run_id=? AND json_extract(i.value,'$.id')=? LIMIT 1`).bind(runId, productId).first()
   if (!member || !query.trim() || query.length > 160) throw new Error('Invalid report item or query')
   const { credentials } = await providerCredentials(env, 'amazon')
-  const api = new AmazonUS(credentials, undefined, env.DB)
+  const source=await env.DB.prepare('SELECT actor FROM job_runs WHERE id=?').bind(runId).first<{actor:string}>()
+  const api = new AmazonUS(credentials, undefined, env.DB,{owner:source!.actor,runId})
   const page = await api.search(query, 6)
   const candidates = []
   const prices = await api.batchOffers(page.items.map(item => item.asin))

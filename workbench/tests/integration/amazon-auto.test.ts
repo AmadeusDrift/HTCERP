@@ -4,6 +4,8 @@ import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { compareAmazonProduct } from '../../packages/amazon/auto-compare'
 import { acquireSlot, observeLimit } from '../../packages/amazon/request-pacing'
+import { dispatch } from '../../packages/operations/service-queue'
+import { AmazonUS } from '../../packages/amazon/adapter'
 import { comparisonTerms, qualify } from '../../packages/amazon/comparison-terms'
 import type { ConnectionBindings } from '../../packages/connections/credentials'
 
@@ -27,6 +29,7 @@ beforeEach(() => {
     '0009_connection_credentials',
     '0019_amazon_auto_comparisons',
     '0021_amazon_request_pacing',
+    '0022_service_queue',
   ])
     sql.exec(readFileSync('migrations/' + name + '.sql', 'utf8'))
   sql
@@ -76,6 +79,27 @@ it('paces simultaneous callers per operation and shares stricter Amazon limits',
   expect(pace.interval_ms).toBe(25000)
   expect(Number(pace.next_at)-Date.now()).toBeGreaterThan(59000)
   expect(Number(pace.slow_until)-Date.now()).toBeGreaterThan(590000)
+})
+it('rotates owners before additional queued tasks from the last owner',async()=>{
+  const order:string[]=[]
+  let release!:()=>void, ready!:()=>void
+  const started=new Promise<void>(r=>ready=r),hold=new Promise<void>(r=>release=r)
+  const first=dispatch(env.DB,'pricing',{owner:'A'},async()=>{order.push('A1');ready();await hold})
+  await started
+  const enqueue=(owner:string,label:string)=>dispatch(env.DB,'pricing',{owner},async()=>{order.push(label)})
+  const work=[enqueue('A','A2'),enqueue('A','A3'),enqueue('B','B1')]
+  await dispatch(env.DB,'catalog',{owner:'B'},async()=>{order.push('catalog')})
+  release()
+  await Promise.all([first,...work])
+  expect(order).toEqual(['A1','catalog','B1','A2','A3'])
+},10000)
+it('uses one upstream offer for overlapping operator requests',async()=>{
+  const send=vi.fn(async(url:RequestInfo|URL)=>String(url).includes('auth/o2')?
+    Response.json({access_token:'fixture'}):Response.json({payload:{Offers:[{ListingPrice:{Amount:4.5,CurrencyCode:'USD'}}]}}))
+  const results=await Promise.all(['A','B'].map(owner=>new AmazonUS(env,send,env.DB,{owner}).offer('B000000001')))
+  expect(results.map(x=>x.price)).toEqual([4.5,4.5])
+  expect(send.mock.calls.filter(([url])=>String(url).endsWith('Consumer')).length).toBe(1)
+  expect(sql.prepare('SELECT count(*) n FROM service_tickets').get()?.n).toBe(0)
 })
 function item(n: number, title: string, pack: number) {
   const marketplaceId = 'ATVPDKIKX0DER'
@@ -191,6 +215,7 @@ it('distinguishes zero qualifying hits, missing offers, and untranslated names w
     send.mock.calls.flatMap(([input]) => new URL(String(input)).searchParams.getAll('keywords')),
   ).toEqual(['plastic dog food scoop 1.69 oz', 'plastic dog food scoop'])
   const noEnglish = { ...product, title_en: undefined }
+  sql.exec('UPDATE public_amazon_searches SET checked_at=0')
   mockMarket([item(2, '50ml Plastic Scoop for Dog Food', 1)], false)
   expect(await compareAmazonProduct(env, 'cn', noEnglish, [])).toMatchObject({
     query: 'plastic dog food scoop 1.69 oz',
@@ -198,6 +223,7 @@ it('distinguishes zero qualifying hits, missing offers, and untranslated names w
     candidates: [{ price: null, shipping: null, priceStatus: 'unavailable' }],
   })
   const empty = mockMarket([])
+  sql.exec('UPDATE public_amazon_searches SET checked_at=0')
   expect(
     await compareAmazonProduct(env, 'unknown', { ...noEnglish, title: '某未知商品' }, []),
   ).toMatchObject({ status: 'no_query', query: '' })

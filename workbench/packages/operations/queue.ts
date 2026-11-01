@@ -53,6 +53,9 @@ export async function advanceQueue(
   await env.DB.prepare(`UPDATE job_seen AS q SET child_id=(
     SELECT old.child_id FROM discovery_input_facts cur JOIN discovery_input_facts old
       ON old.product_id=cur.product_id AND old.strategy_version=cur.strategy_version AND old.facts=cur.facts
+    JOIN job_runs old_parent ON old_parent.id=old.run_id
+    JOIN job_runs new_parent ON new_parent.id=cur.run_id AND new_parent.actor=old_parent.actor
+      AND new_parent.inputs_json=old_parent.inputs_json
     WHERE cur.run_id=q.run_id AND cur.product_id=q.product_id AND old.run_id<>cur.run_id AND old.child_id IS NOT NULL
     LIMIT 1) WHERE q.run_id=? AND q.tier IS NOT NULL AND q.child_id IS NULL`)
     .bind(job.id)
@@ -115,7 +118,7 @@ export async function advanceQueue(
             },
           },
           job.actor,
-          'tier-v2:' + job.strategy_version + ':' + item.productId + ':' + (await hash(item.facts)),
+          'tier-v3:' + job.strategy_version + ':' + item.productId + ':' + (await hash(JSON.stringify([job.actor,job.inputs_json,item.facts]))),
           job,
         )
         await env.DB.prepare(

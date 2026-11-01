@@ -89,9 +89,10 @@ export async function listJobs(
   status: string,
   page: number,
   pageSize: number,
+  owner?:string,
 ) {
-  const where = "WHERE (?='' OR kind=?) AND (?='' OR status=?)",
-    params = [kind, kind, status, status]
+  const where = "WHERE (?='' OR kind=?) AND (?='' OR status=?)"+(owner?' AND actor=?':''),
+    params = [kind, kind, status, status,...(owner?[owner]:[])]
   const [count, rows] = await db.batch([
     db.prepare('SELECT COUNT(*) AS n FROM job_runs ' + where).bind(...params),
     db

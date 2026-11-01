@@ -72,7 +72,7 @@ comparisons.post('/products/:id/amazon/search', async (c) => {
   let result: Awaited<ReturnType<AmazonUS['search']>>
   try {
     const { credentials } = await providerCredentials(c.env, 'amazon')
-    result = await new AmazonUS(credentials, undefined, c.env.DB).search(query, 6, cursor)
+    result = await new AmazonUS(credentials, undefined, c.env.DB,{owner:c.var.actor.email}).search(query, 6, cursor)
   } catch (e) {
     if (e instanceof PublicError && e.code !== 'NOT_CONFIGURED')
       await db
@@ -152,7 +152,7 @@ comparisons.post('/products/:id/amazon/matches/:asin', async (c) => {
     let state: string
     try {
       const { credentials } = await providerCredentials(c.env, 'amazon')
-      offer = await new AmazonUS(credentials, undefined, c.env.DB).offer(asin)
+      offer = await new AmazonUS(credentials, undefined, c.env.DB,{owner:c.var.actor.email}).offer(asin)
       state = offer.price === null ? 'unavailable' : 'available'
     } catch (e) {
       state = e instanceof PublicError ? e.code : 'SOURCE_UNAVAILABLE'

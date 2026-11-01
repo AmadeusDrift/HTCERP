@@ -164,6 +164,7 @@ export async function compareAmazonProduct(
   product: Record<string, unknown>,
   variants: unknown[],
   proposedQuery?: string,
+  caller?: import('../operations/service-queue').DispatchIdentity,
 ): Promise<AmazonComparison> {
   const db = env.DB,
     productId = String(product.id)
@@ -211,7 +212,7 @@ export async function compareAmazonProduct(
   if (query) {
     try {
       const { credentials } = await providerCredentials(env, 'amazon')
-      const api = new AmazonUS(credentials, undefined, env.DB)
+      const api = new AmazonUS(credentials, undefined, env.DB,caller)
       const queries = [...new Set([query, terms.fallbackQuery].filter((v): v is string => !!v))]
       result.queries = []
       for (const keyword of queries) {

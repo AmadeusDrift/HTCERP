@@ -9,7 +9,8 @@ export async function expandedScreen(env: ConnectionBindings, runId: string, see
   const known = await env.DB.prepare(`SELECT COUNT(*) n FROM job_seen WHERE run_id=? AND product_id IN
     (SELECT json_extract(value,'$.productId') FROM json_each(?))`).bind(runId,JSON.stringify(seeds)).first<{n:number}>()
   if(known?.n!==seeds.length) throw new Error('Source product outside archived discovery')
-  const api = new AmazonUS((await providerCredentials(env,'amazon')).credentials, undefined, env.DB)
+  const source=await env.DB.prepare('SELECT actor FROM job_runs WHERE id=?').bind(runId).first<{actor:string}>()
+  const api = new AmazonUS((await providerCredentials(env,'amazon')).credentials, undefined, env.DB,{owner:source!.actor,runId})
   const matches = []
   const retry = { retries: {limit:3,delay:'15 seconds' as const,backoff:'exponential' as const} }
   for(const seed of seeds){

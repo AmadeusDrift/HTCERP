@@ -45,7 +45,7 @@ export class ResearchWorkflow extends WorkflowEntrypoint<OpsBindings, WorkflowIn
     const execute = async (key: string, title: string, fn: Parameters<typeof stepOnce>[3]) => {
       const outcome = await step.do(
         key,
-        { retries: { limit: 0, delay: '1 second' }, timeout: '3 minutes' },
+        { retries: { limit: 0, delay: '1 second' }, timeout: '25 minutes' },
         async () => {
           try {
             const result = await stepOnce(c, key, title, fn)

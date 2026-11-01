@@ -90,7 +90,35 @@ operationsRoutes.get('/jobs', async (c) => {
     }),
     c.req.query(),
   )
-  return c.json(await listJobs(c.env.DB, q.kind, q.status, q.page, q.pageSize))
+  return c.json(await listJobs(c.env.DB, q.kind, q.status, q.page, q.pageSize,c.var.actor.role==='admin'?undefined:c.var.actor.email))
+})
+operationsRoutes.get('/dispatch',async c=>{
+  const admin=c.var.actor.role==='admin'
+  const rows=await c.env.DB.prepare(`SELECT t.token,t.lane,t.active,t.priority,t.owner,t.run_id AS runId,j.title,
+    (SELECT COUNT(*) FROM job_seen s WHERE s.run_id=t.run_id) examined,
+    (SELECT count(DISTINCT x.owner) FROM service_tickets x WHERE x.lane=t.lane AND x.expires>unixepoch() AND x.id<>t.id) peers,
+    (SELECT min(seconds) FROM dispatch_durations d WHERE d.lane=t.lane) fast,
+    (SELECT max(seconds) FROM dispatch_durations d WHERE d.lane=t.lane) slow
+    FROM service_tickets t LEFT JOIN job_runs j ON t.run_id=j.id
+    WHERE t.expires>unixepoch() AND (?=1 OR t.owner=?) ORDER BY t.active DESC,t.priority DESC,t.id LIMIT 100`)
+    .bind(Number(admin),c.var.actor.email).all()
+  return c.json({items:rows.results})
+})
+operationsRoutes.post('/dispatch/:token/priority',async c=>{
+  if(c.var.actor.role!=='admin') throw new PublicError('FORBIDDEN','只有管理员可以调整顺序。',403)
+  const result=await c.env.DB.prepare('UPDATE service_tickets SET priority=1 WHERE token=? AND active=0 AND expires>unixepoch()')
+    .bind(c.req.param('token')).run()
+  return c.json({updated:result.meta.changes>0})
+})
+operationsRoutes.use('/jobs/:id',async(c,next)=>{
+  if(c.var.actor.role!=='admin' && (await getRun(c.env.DB,c.req.param('id'))).actor!==c.var.actor.email)
+    throw new PublicError('NOT_FOUND','未找到任务。',404)
+  return next()
+})
+operationsRoutes.use('/jobs/:id/*',async(c,next)=>{
+  if(c.var.actor.role!=='admin' && (await getRun(c.env.DB,c.req.param('id'))).actor!==c.var.actor.email)
+    throw new PublicError('NOT_FOUND','未找到任务。',404)
+  return next()
 })
 operationsRoutes.get('/jobs/:id', async (c) => {
   const job = await jobView(c.env.DB, c.req.param('id'))

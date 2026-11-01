@@ -256,7 +256,9 @@ it('shows historical job diagnostics without supplier payloads while preserving 
     'https://openapi.geekbi.com/private/raw',
     job.id,
   )
-  for (const cookie of [admin, reader]) {
+  expect((await get('/jobs/'+job.id,reader)).status).toBe(404)
+  expect(await (await get('/jobs',reader)).json()).toMatchObject({items:[]})
+  for (const cookie of [admin]) {
     const entry = (await (await get('/jobs/' + job.id, cookie)).json()) as {
       title: string
       inputs: { goal: string }

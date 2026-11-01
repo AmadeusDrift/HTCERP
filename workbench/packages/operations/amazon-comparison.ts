@@ -89,6 +89,8 @@ export async function runAmazonComparison(
         job.id,
         english ? { ...product, title_en: english } : product,
         Array.isArray(variants) ? variants : [],
+        undefined,
+        {owner:job.actor,runId:job.id,attempt:job.status==='running'?job.attempt:undefined},
       ),
     )
   }

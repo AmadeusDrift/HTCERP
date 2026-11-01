@@ -246,7 +246,8 @@ it('runs the Amazon supplement on an older AI decision, preserves the original a
   expect((await req('viewer', path, 'POST')).status).toBe(403)
   expect((await archive()).reports[0].items[0]).toMatchObject({ amazonEligible: true })
   expect(vendor).not.toHaveBeenCalled()
-  expect((await req('operator', path, 'POST')).status).toBe(200)
+  expect((await req('operator', path, 'POST')).status).toBe(404)
+  expect((await req('admin', path, 'POST')).status).toBe(200)
   const checked = (await archive()).reports[0].items
   expect(checked[0].amazonComparison).toMatchObject({
     status: 'found',
@@ -274,7 +275,7 @@ it('runs the Amazon supplement on an older AI decision, preserves the original a
   ).run(jobId)
   const priorPage = db.prepare('SELECT id FROM amazon_searches WHERE product_id=?').get(sourceId)?.id
   expect((await req('admin', path, 'POST')).status).toBe(200)
-  expect(vendor).toHaveBeenCalledTimes(2 * cost)
+  expect(vendor).toHaveBeenCalledTimes(cost)
   expect((await archive()).reports[0].items[0].amazonComparison?.methodVersion).toBe(2)
   expect(
     db.prepare('SELECT COUNT(*) AS n FROM amazon_searches WHERE product_id=?').get(sourceId)?.n,
@@ -283,7 +284,7 @@ it('runs the Amazon supplement on an older AI decision, preserves the original a
     priorPage,
   )
   expect((await req('admin', path, 'POST')).status).toBe(200)
-  expect(vendor).toHaveBeenCalledTimes(2 * cost)
+  expect(vendor).toHaveBeenCalledTimes(cost)
   expect(db.prepare('SELECT report_json FROM admin_daily_reports').get()?.report_json).toBe(raw)
 })
 

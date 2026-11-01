@@ -367,6 +367,9 @@ function JobDetail({ id }: { id: string }) {
   )
 }
 export function Tasks() {
+  const {admin}=useAccess(),priority=useWrite()
+  const dispatch=useData<{items:{token:string;lane:string;active:number;priority:number;owner:string;runId:string|null;title:string|null;examined:number;peers:number;fast:number|null;slow:number|null}[]}>('/dispatch',true,5000)
+  const serviceNames:Record<string,string>={geekbi:'商品采集',ai:'AI 分析',catalog:'Amazon 搜索',pricing:'Amazon 核价'}
   const { params } = useLocation(),
     go = useGo(),
     kind = params.get('kind') || '',
@@ -405,6 +408,12 @@ export function Tasks() {
           新建任务
         </PageLink>
       </Title>
+      {!!dispatch.data?.items?.length && <Panel title={admin?'团队调度队列':'我的调度队列'}><div className="panel-body stack">
+        {dispatch.data.items.map(t=><div className="spread wrap" key={t.token}><div><b>{t.title??serviceNames[t.lane]}</b>
+        <small className="block">{admin?t.owner+' · ':''}{t.active?'正在处理':'排队中'} · {serviceNames[t.lane]}{t.examined?' · 已检查 '+t.examined+' 款':''}
+        {!t.active && t.peers>0 && t.slow!==null && ' · 预计等待约 0–'+Math.max(1,Math.ceil(t.slow*t.peers/60))+' 分钟（按近期批次估算）'}</small></div>
+        {admin && !t.active && <button disabled={!!t.priority||priority.isPending} onClick={()=>priority.mutate({path:'/dispatch/'+t.token+'/priority',body:{}})}>{t.priority?'已优先':'优先处理这一批'}</button>}</div>)}
+        <ErrorBox error={priority.error}/></div></Panel>}
       <div className="metrics">
         <Metric
           label="全部任务"
