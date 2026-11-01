@@ -129,7 +129,13 @@ export function Potential() {
                       <td>
                         <PageLink className="potential-item" href={productUrl(p.id, url)} title={p.title}>
                           <Thumb p={p}/>
-                          <span className="potential-copy"><b>{p.title}</b><small>{p.category.split(' / ').at(-1)}</small></span>
+                          <span className="potential-copy">
+                            <span className="potential-name">
+                              {p.id.startsWith('temu:') && <span className="potential-temu" role="img" aria-label="来源：Temu" title="Temu">T</span>}
+                              <b>{p.title}</b>
+                            </span>
+                            <small>{p.category.split(' / ').at(-1)}</small>
+                          </span>
                         </PageLink>
                       </td>
                       <td>
