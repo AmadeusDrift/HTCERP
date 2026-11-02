@@ -2,6 +2,7 @@ export { AssistantWorkflow } from './assistant-workflow'
 
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloudflare:workers'
 import { runAmazonComparison } from '../../../packages/operations/amazon-comparison'
+import { runAssistantOperation } from '../../../packages/operations/assistant-actions'
 import {
   activeContext,
   discoverPage,
@@ -14,6 +15,7 @@ import {
 } from '../../../packages/operations/execution'
 import { runSchedule } from '../../../packages/operations/jobs'
 import type { OpsBindings } from '../../../packages/operations/model'
+import { getRun } from '../../../packages/operations/model'
 import { Stop } from '../../../packages/operations/providers'
 import { advanceQueue } from '../../../packages/operations/queue'
 import { expandedScreen, type Seed } from './expanded-screen'
@@ -27,6 +29,11 @@ type WorkflowInput = {
 export class ResearchWorkflow extends WorkflowEntrypoint<OpsBindings, WorkflowInput> {
   async run(event: WorkflowEvent<WorkflowInput>, step: WorkflowStep) {
     const id = event.payload.runId
+    const operation = await step.do(
+      'read-explicit-operation-v1',
+      async () => JSON.parse((await getRun(this.env.DB, id)).inputs_json).operation ?? null,
+    )
+    if (operation) return runAssistantOperation(this.env, id, event.instanceId, step)
     if (event.payload.expandSeeds) return expandedScreen(this.env, id, event.payload.expandSeeds, step)
     const screen = event.payload.reportScreen
     if (screen)

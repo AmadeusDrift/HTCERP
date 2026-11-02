@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { dailyOutstandingAllocationSql } from '../assistant/budget'
 import { type ConnectionBindings, redactJson } from '../connections/credentials'
 import { PublicError } from '../contracts/errors'
 import { geekCredential, geekDay, isGeekSlotRefused, nextGeekSlot } from './geekbi'
@@ -11,6 +12,7 @@ import {
   retryAt,
   sendRequest,
 } from './providers'
+import { type DispatchIdentity, dispatch } from './service-queue'
 
 type DirectEnv = ConnectionBindings & { ARCHIVE: R2Bucket }
 type Selected = NonNullable<Awaited<ReturnType<typeof geekCredential>>>
@@ -84,7 +86,7 @@ async function directRead(
          WHERE COALESCE((SELECT MAX(rowid) FROM usage_reservations WHERE direct_key=?),0)=?
            AND (?=0 OR NOT EXISTS(SELECT 1 FROM usage_reservations WHERE balance_refused=1 AND business_date=? AND credential_slot=? AND ? IN (credential_revision,legacy_binding_match)))
            AND NOT EXISTS(SELECT 1 FROM usage_reservations WHERE unit='points' AND business_date=? AND actual>reserved)
-           AND (?=0 OR ?+(SELECT COALESCE(SUM(COALESCE(actual,reserved)),0) FROM usage_reservations WHERE unit='points' AND business_date=?)
+           AND (?=0 OR ?+(SELECT COALESCE(SUM(COALESCE(actual,reserved)),0) FROM usage_reservations WHERE unit='points' AND business_date=?)+${dailyOutstandingAllocationSql('points', '?')}
                <= (SELECT json_extract(settings_json,'$.dataDailyPoints') FROM strategy_versions ORDER BY version DESC LIMIT 1))
          RETURNING rowid AS id`,
         )
@@ -105,6 +107,7 @@ async function directRead(
           day,
           estimate,
           estimate,
+          day,
           day,
         )
         .first<{ id: number }>()
@@ -192,16 +195,23 @@ async function directRead(
   }
 }
 
-export async function readGeekbiReviews(env: DirectEnv, goodsId: string, refreshVersion: number) {
-  return directRead(env, 'temu-reviews/US/' + goodsId + '/' + refreshVersion, (credentials) =>
-    geekRequest(credentials, 'temu', 'reviews', {
-      goodsId,
-      regionId: '211',
-      scoreMin: '1',
-      scoreMax: '2',
-      page: '1',
-      size: '30',
-    }),
+export async function readGeekbiReviews(
+  env: DirectEnv,
+  goodsId: string,
+  refreshVersion: number,
+  identity: DispatchIdentity = { owner: 'interactive-review' },
+) {
+  return dispatch(env.DB, 'geekbi', identity, () =>
+    directRead(env, 'temu-reviews/US/' + goodsId + '/' + refreshVersion, (credentials) =>
+      geekRequest(credentials, 'temu', 'reviews', {
+        goodsId,
+        regionId: '211',
+        scoreMin: '1',
+        scoreMax: '2',
+        page: '1',
+        size: '30',
+      }),
+    ),
   )
 }
 

@@ -9,6 +9,19 @@ beforeEach(() => {
 })
 afterEach(() => f.db.close())
 const start = () => createAssistantRun(f.env, 'alice', f.conversationId, f.turnId, '比较库存商品', {})
+it('recognizes omitted and explicit defaults as the same cached read', async () => {
+  f.fetch.mockResolvedValueOnce(
+    modelAction({ type: 'tool', name: 'search_inventory', args: { platform: 'temu' } }),
+  )
+  f.fetch.mockResolvedValueOnce(
+    modelAction({ type: 'tool', name: 'search_inventory', args: { platform: 'temu', page: 1 } }),
+  )
+  const result = await run((await start()).id)
+  expect(result.status).toBe('partial')
+  expect(result.toolSteps).toBe(1)
+  expect(result.answer).toContain('相同工具参数')
+  expect(f.fetch).toHaveBeenCalledTimes(2)
+})
 async function run(id: string, n = 20) {
   for (let i = 0; i < n; i++) if (!(await advanceAssistantRun(f.env, id, 1)).continue) break
   return readAssistantRun(f.env, 'alice', id)
@@ -95,7 +108,7 @@ it('stops deactivated accounts and unavailable credentials without model sends',
   f.db.exec("UPDATE accounts SET active=0 WHERE id='alice'")
   await advanceAssistantRun(f.env, first.id, 1)
   expect(f.fetch).not.toHaveBeenCalled()
-  expect(f.db.prepare('SELECT status FROM assistant_runs').get()?.status).toBe('partial')
+  expect(f.db.prepare('SELECT status FROM assistant_runs').get()?.status).toBe('failed')
 })
 
 it('recovers a durably archived model response without sending it a second time', async () => {
@@ -178,11 +191,11 @@ it('denied or unavailable tools cannot support a successful final report', async
   expect(result.status).toBe('partial')
   expect(result.report.missing.join(' ')).toContain('证据')
 })
-it('a clarification ends with a useful partial report that requests a fresh self-contained goal', async () => {
+it('a clarification waits for input in the original investigation and preserves the question', async () => {
   f.fetch.mockResolvedValueOnce(modelAction({ type: 'clarify', question: '需要哪个平台？' }))
   const result = await run((await start()).id)
-  expect(result.status).toBe('partial')
-  expect(result.answer).toContain('补充目标后开始新调查')
+  expect(result.status).toBe('awaiting_input')
+  expect(result.answer).toContain('需要哪个平台')
   await expect(controlAssistantRun(f.env, 'alice', result.id, 'resume')).rejects.toThrow()
 })
 it('cancellation while waiting for the AI lane removes the ticket without sending or spending', async () => {

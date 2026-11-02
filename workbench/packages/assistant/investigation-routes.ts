@@ -3,8 +3,10 @@ import { z } from 'zod'
 import type { AppEnv } from '../../apps/api/src/bindings'
 import { PublicError } from '../contracts/errors'
 import { parse } from '../operations/model'
+import { assistantMessageSchema, submitAssistantMessage } from './followups'
 import { missing, sanitizeImage, turnSchema, workspaceContext } from './model'
-import { controlAssistantRun, createAssistantRun, readAssistantRun } from './runs'
+import { confirmAssistantProposal, createAssistantProposal, rejectAssistantProposal } from './online'
+import { controlAssistantRun, createAssistantRun, readAssistantRun, wakeAssistantRun } from './runs'
 
 export const investigationRoutes = new Hono<AppEnv>()
 investigationRoutes.post('/conversations/:id/investigations', async (c) => {
@@ -74,6 +76,39 @@ investigationRoutes.post('/conversations/:id/investigations', async (c) => {
 investigationRoutes.get('/investigations/:id', async (c) =>
   c.json(await readAssistantRun(c.env, c.var.actor.id, parse(z.uuid(), c.req.param('id')))),
 )
+investigationRoutes.post('/investigations/:id/messages', async (c) =>
+  c.json(
+    await submitAssistantMessage(
+      c.env,
+      c.var.actor.id,
+      parse(z.uuid(), c.req.param('id')),
+      parse(assistantMessageSchema, await c.req.json()),
+    ),
+  ),
+)
+investigationRoutes.post('/investigations/:id/proposals', async (c) =>
+  c.json(
+    await createAssistantProposal(
+      c.env,
+      c.var.actor.id,
+      parse(z.uuid(), c.req.param('id')),
+      await c.req.json(),
+    ),
+  ),
+)
+investigationRoutes.post('/investigations/:id/proposals/:proposalId/:action', async (c) => {
+  const id = parse(z.uuid(), c.req.param('id')),
+    proposalId = parse(z.uuid(), c.req.param('proposalId')),
+    action = parse(z.enum(['confirm', 'reject']), c.req.param('action'))
+  if (action === 'confirm') {
+    await confirmAssistantProposal(c.env, c.var.actor.id, id, proposalId)
+    await wakeAssistantRun(c.env, id)
+  } else {
+    await rejectAssistantProposal(c.env, c.var.actor.id, id, proposalId)
+    await wakeAssistantRun(c.env, id)
+  }
+  return c.json(await readAssistantRun(c.env, c.var.actor.id, id))
+})
 investigationRoutes.post('/investigations/:id/:action', async (c) =>
   c.json(
     await controlAssistantRun(

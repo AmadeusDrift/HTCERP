@@ -1,5 +1,8 @@
 import { PublicError } from '../contracts/errors'
 import type { OpsBindings } from '../operations/model'
+import { investigationUsage } from './budget'
+import { assistantOnlineView } from './online'
+import { privateEvidenceLostSql } from './policy'
 import { persistInvestigationReport } from './report'
 
 export interface AssistantBindings extends OpsBindings {
@@ -31,6 +34,7 @@ export type AssistantRunRow = {
   attempt: number
   version: number
   workflow_started: number
+  wake_requested: number
   lease_token: string | null
   lease_until: number | null
   report_json: string | null
@@ -71,16 +75,30 @@ export async function readAssistantRun(
     .bind(row.conversation_id, accountId, row.origin_turn_id)
     .first<{ answer: string | null }>()
   if (!turn) throw unavailable()
-  const usage = await env.DB.prepare(
-    "SELECT COALESCE(SUM(COALESCE(actual,reserved)),0) aiMicros,COALESCE(SUM(CASE WHEN state!='confirmed' THEN reserved ELSE 0 END),0) unconfirmedAiMicros FROM usage_reservations WHERE assistant_run_id=? AND unit='micros'",
-  )
-    .bind(id)
-    .first<{ aiMicros: number; unconfirmedAiMicros: number }>()
+  const [usage, online, messages, versions] = await Promise.all([
+    investigationUsage(env.DB, id),
+    assistantOnlineView(env.DB, id),
+    env.DB.prepare(
+      "SELECT id,message,state,created_at createdAt FROM assistant_messages WHERE run_id=? AND intent='continue' ORDER BY seq",
+    )
+      .bind(id)
+      .all(),
+    env.DB.prepare(
+      'SELECT revision,scope_version scopeVersion,answer,created_at generatedAt FROM assistant_report_versions WHERE run_id=? ORDER BY revision',
+    )
+      .bind(id)
+      .all(),
+  ])
   const report = row.report_json ? JSON.parse(row.report_json) : null
+  const lost = !!(await env.DB.prepare('SELECT 1 WHERE ' + privateEvidenceLostSql('?1'))
+    .bind(id)
+    .first())
+  const restricted = '任务查看权限已变化，旧报告暂不可展示，请重新调查。'
   return {
     id: row.id,
     status: row.status,
     attempt: row.attempt,
+    scopeVersion: row.scope_version,
     goal: row.goal,
     conversationId: row.conversation_id,
     originTurnId: row.origin_turn_id,
@@ -88,10 +106,13 @@ export async function readAssistantRun(
     toolSteps: row.tool_steps,
     activeMs: row.active_ms,
     limits: JSON.parse(row.limits_json) as AssistantLimits,
-    summary: row.summary,
-    answer: turn.answer ?? report?.summary ?? null,
-    report,
-    usage: { dataPoints: 0, ...usage },
+    summary: lost ? restricted : row.summary,
+    answer: lost ? restricted : (turn.answer ?? report?.summary ?? null),
+    report: lost ? null : report,
+    usage,
+    ...(lost ? { proposals: online.proposals, linkedJobs: [] } : online),
+    messages: messages.results,
+    reportVersions: lost ? [] : versions.results,
     updatedAt: row.updated_at,
   }
 }
@@ -119,6 +140,26 @@ async function startWorkflow(env: AssistantBindings, row: AssistantRunRow) {
   await env.DB.prepare('UPDATE assistant_runs SET workflow_started=1 WHERE id=? AND attempt=?')
     .bind(row.id, row.attempt)
     .run()
+}
+export async function wakeAssistantRun(env: AssistantBindings, id: string) {
+  if (
+    !(await env.DB.prepare(
+      'SELECT 1 FROM assistant_runs r JOIN accounts a ON a.id=r.account_id JOIN assistant_conversations c ON c.id=r.conversation_id WHERE r.id=? AND a.active=1 AND c.account_id=a.id',
+    )
+      .bind(id)
+      .first())
+  )
+    return
+  let row = await assistantRunRow(env.DB, id)
+  if (row.lease_token && (row.lease_until ?? 0) > Date.now()) return
+  if (row.wake_requested && row.status === 'queued') {
+    await env.DB.prepare(`UPDATE assistant_runs SET attempt=attempt+1,workflow_started=0,wake_requested=0,version=version+1
+      WHERE id=? AND version=? AND status='queued' AND wake_requested=1 AND (lease_until IS NULL OR lease_until<=?)`)
+      .bind(id, row.version, Date.now())
+      .run()
+    row = await assistantRunRow(env.DB, id)
+  }
+  await startWorkflow(env, row)
 }
 export async function createAssistantRun(
   env: AssistantBindings,
@@ -155,7 +196,8 @@ export async function createAssistantRun(
     .bind(conversationId, turnId, accountId)
     .first<AssistantRunRow>()
   if (!row) throw unavailable()
-  if (row.goal !== goal.trim()) throw new PublicError('CONFLICT', '同一条消息的调查目标不能改变。', 409)
+  if ((JSON.parse(row.context_json).originalGoal ?? row.goal) !== goal.trim())
+    throw new PublicError('CONFLICT', '同一条消息的调查目标不能改变。', 409)
   await env.DB.prepare(
     "UPDATE assistant_turns SET context_json=json_set(context_json,'$.runId',?) WHERE conversation_id=? AND id=?",
   )

@@ -1,13 +1,19 @@
-import type { AmazonComparison } from '../amazon/auto-compare'
 import { AmazonUS } from '../amazon/adapter'
-import { dispatch } from './service-queue'
+import type { AmazonComparison } from '../amazon/auto-compare'
 import { haulPriceTier } from '../amazon/haul-price-tier'
+import {
+  assertAssistantChildActive,
+  childAuthorizationSql,
+  claimAssistantCall,
+  dailyOutstandingAllocationSql,
+} from '../assistant/budget'
 import { normalizeProduct } from '../catalog/facts'
 import { ingestGeekbi } from '../catalog/ingest'
 import { geekSlots, providerCredentials, redactJson } from '../connections/credentials'
 import { PublicError } from '../contracts/errors'
 import { amazonModelFacts, researchProducts } from './amazon-comparison'
 import { geekCredential, isGeekSlotRefused, nextGeekSlot } from './geekbi'
+import { dispatch } from './service-queue'
 
 export { testGeekbiSlot } from './geekbi-direct'
 
@@ -57,6 +63,7 @@ interface Context {
 }
 export const instanceId = (job: JobRow) => 'job-' + job.id + '-' + job.attempt
 async function stillActive(c: Context) {
+  await assertAssistantChildActive(c.env.DB, c.job.id)
   const j = await getRun(c.env.DB, c.job.id)
   if (j.attempt !== c.attempt || j.status !== 'running')
     throw new Stop('任务已经暂停、取消或切换执行实例')
@@ -86,19 +93,24 @@ export async function reserve(
   revision: string | null = null,
 ) {
   const db = c.env.DB,
-    daily = unit === 'points' ? 'dataDailyPoints' : 'aiDailyMicros'
+    daily = unit === 'points' ? 'dataDailyPoints' : 'aiDailyMicros',
+    date = businessClock().slice(0, 10)
   const runCap = unit === 'points' ? c.input.maxDataPoints : c.input.maxAiMicros
-  const date = businessClock().slice(0, 10)
-  const insert = await db
-    .prepare(`INSERT INTO usage_reservations(run_id,step_key,unit,business_date,reserved,state,created_at,attempt,logical_key,credential_slot,credential_revision)
-    SELECT ?,?,?,?,?,'reserved',?,?,?,?,? WHERE EXISTS(SELECT 1 FROM job_runs WHERE id=? AND attempt=? AND status='running')
-    AND (SELECT COUNT(*) FROM usage_reservations WHERE run_id=? AND logical_key=?)=?
-    AND NOT EXISTS(SELECT 1 FROM usage_reservations WHERE balance_refused=1 AND business_date=? AND credential_slot=? AND ? IN (credential_revision,legacy_binding_match))
-    AND NOT EXISTS(SELECT 1 FROM usage_reservations WHERE business_date=? AND unit=? AND actual>reserved)
-    AND ?+(SELECT COALESCE(SUM(COALESCE(actual,reserved)),0) FROM usage_reservations WHERE unit=? AND business_date=?)
-       <= MIN(?,(SELECT json_extract(settings_json,'$.${daily}') FROM strategy_versions ORDER BY version DESC LIMIT 1))
-    AND ?+(SELECT COALESCE(SUM(COALESCE(actual,reserved)),0) FROM usage_reservations WHERE unit=? AND run_id=?) <= ?
-    ON CONFLICT(run_id,step_key) DO NOTHING`)
+  const allocation = unit === 'points' ? 'allocated_points' : 'allocated_micros'
+  const insert = db
+    .prepare(`INSERT INTO usage_reservations(run_id,step_key,unit,business_date,reserved,state,created_at,attempt,logical_key,credential_slot,credential_revision,assistant_run_id,assistant_link_id)
+    SELECT ?1,?2,?3,?4,?5,'reserved',?6,?7,?8,?9,?10,(SELECT run_id FROM assistant_job_links WHERE job_id=?1),(SELECT id FROM assistant_job_links WHERE job_id=?1)
+    WHERE EXISTS(SELECT 1 FROM job_runs WHERE id=?1 AND attempt=?7 AND status='running')
+    AND (SELECT COUNT(*) FROM usage_reservations WHERE run_id=?1 AND logical_key=?8)=?11
+    AND NOT EXISTS(SELECT 1 FROM usage_reservations WHERE balance_refused=1 AND business_date=?4 AND credential_slot=?9 AND ?10 IN (credential_revision,legacy_binding_match))
+    AND NOT EXISTS(SELECT 1 FROM usage_reservations WHERE business_date=?4 AND unit=?3 AND actual>reserved)
+    AND ?5+(SELECT COALESCE(SUM(COALESCE(actual,reserved)),0) FROM usage_reservations WHERE unit=?3 AND business_date=?4)+${dailyOutstandingAllocationSql(unit, '?4')}
+      -COALESCE((SELECT MIN(?5,MAX(0,l.${allocation}-(SELECT COALESCE(SUM(COALESCE(actual,reserved)),0) FROM usage_reservations WHERE assistant_link_id=l.id AND unit=?3))) FROM assistant_job_links l WHERE l.job_id=?1 AND l.business_date=?4 AND l.state IN ('pending','submitted','uncertain')),0)
+      <=MIN(?12,(SELECT json_extract(settings_json,'$.${daily}') FROM strategy_versions ORDER BY version DESC LIMIT 1))
+    AND ?5+(SELECT COALESCE(SUM(COALESCE(actual,reserved)),0) FROM usage_reservations WHERE unit=?3 AND run_id=?1)<=?13
+    AND (NOT EXISTS(SELECT 1 FROM assistant_job_links WHERE job_id=?1) OR (${childAuthorizationSql('?1')}
+      AND EXISTS(SELECT 1 FROM assistant_job_links l WHERE l.job_id=?1 AND l.calls_used<l.calls_limit AND ?5+(SELECT COALESCE(SUM(COALESCE(actual,reserved)),0) FROM usage_reservations WHERE assistant_link_id=l.id AND unit=?3)<=l.${allocation})))
+    ON CONFLICT(run_id,step_key) DO NOTHING RETURNING rowid`)
     .bind(
       c.job.id,
       key,
@@ -110,27 +122,17 @@ export async function reserve(
       logicalKey,
       slot,
       revision,
-      c.job.id,
-      c.attempt,
-      c.job.id,
-      logicalKey,
       priorCount,
-      date,
-      slot,
-      revision,
-      date,
-      unit,
-      amount,
-      unit,
-      date,
       c.settings[daily],
-      amount,
-      unit,
-      c.job.id,
       Math.min(runCap ?? c.settings[daily], c.settings[daily]),
     )
-    .run()
-  if (insert.meta.changes) return
+  const [inserted] = await db.batch([
+    insert,
+    db
+      .prepare('UPDATE assistant_job_links SET calls_used=calls_used+1 WHERE changes()=1 AND job_id=?')
+      .bind(c.job.id),
+  ])
+  if (inserted.meta?.changes || inserted.results?.length) return
   const prior = await db
     .prepare('SELECT state FROM usage_reservations WHERE run_id=? AND step_key=?')
     .bind(c.job.id, key)
@@ -139,16 +141,37 @@ export async function reserve(
   if (revision && (await isGeekSlotRefused(db, slot, revision)))
     throw new PublicError('SLOT_REFUSED', '该组今天已返回余额不足。', 409)
   await stillActive(c)
-  throw new Stop(unit === 'points' ? '积分预算不足，未发送此请求' : 'AI 金额预算不足，未发送此请求')
+  throw new Stop(
+    unit === 'points'
+      ? '积分或调查分配预算不足，未发送此请求'
+      : 'AI 金额或调查分配预算不足，未发送此请求',
+  )
 }
-async function archived(
-  c:Context,key:string,unit:Unit,estimate:number,
-  request:Parameters<typeof archivedOnTurn>[4],
+
+export async function archived(
+  c: Context,
+  key: string,
+  unit: Unit,
+  estimate: number,
+  request: Parameters<typeof archivedOnTurn>[4],
 ) {
-  return dispatch(c.env.DB,unit==='points'?'geekbi':'ai',{owner:c.job.actor,runId:c.job.id,attempt:c.attempt},async()=>{
-    await stillActive(c)
-    return archivedOnTurn(c,key,unit,estimate,request)
-  })
+  return dispatch(
+    c.env.DB,
+    unit === 'points' ? 'geekbi' : 'ai',
+    {
+      owner: c.job.actor,
+      runId: c.job.id,
+      attempt: c.attempt,
+      shouldContinue: async () => {
+        await stillActive(c)
+        return true
+      },
+    },
+    async () => {
+      await stillActive(c)
+      return archivedOnTurn(c, key, unit, estimate, request)
+    },
+  )
 }
 async function archivedOnTurn(
   c: Context,
@@ -375,14 +398,21 @@ export async function discoverPage(c: Context, page: number, ids: string[]): Pro
     const item = normalizeProduct(row, origin),
       tier = potential ? 0 : tierFor(item.total_sold ?? (s.platform === 'amazon' ? 0 : null), s.tiers)
     if (item.total_sold === null) missingSold++
-    const withinWindow = !item.on_sale_at || (item.on_sale_at >= newSince && item.on_sale_at <= result.fetchedAt)
-    const inCategory = !ids.length || ids.includes(item.category_id ?? '') ||
-      (s.platform === 'amazon' && Array.isArray(row.catIds) && row.catIds.some(id => ids.includes(String(id))))
+    const withinWindow =
+      !item.on_sale_at || (item.on_sale_at >= newSince && item.on_sale_at <= result.fetchedAt)
+    const inCategory =
+      !ids.length ||
+      ids.includes(item.category_id ?? '') ||
+      (s.platform === 'amazon' &&
+        Array.isArray(row.catIds) &&
+        row.catIds.some((id) => ids.includes(String(id))))
     let reason = null
     if (potential && !withinWindow) reason = '超出新品时间范围'
     else if (!inCategory) reason = '类目不符'
-    else if ((potential && item.currency !== 'USD') || (s.maxPrice !== null && item.min_price === null)) reason = '资料不足'
-    else if (s.maxPrice !== null && item.min_price !== null && item.min_price > s.maxPrice) reason = '超出价格上限'
+    else if ((potential && item.currency !== 'USD') || (s.maxPrice !== null && item.min_price === null))
+      reason = '资料不足'
+    else if (s.maxPrice !== null && item.min_price !== null && item.min_price > s.maxPrice)
+      reason = '超出价格上限'
     else if (tier === null) reason = item.total_sold === null ? '资料不足' : '销量未达标'
     const eligible = reason === null
     if (!seen.has(item.id) || eligible)
@@ -399,7 +429,9 @@ export async function discoverPage(c: Context, page: number, ids: string[]): Pro
         ' ON CONFLICT(run_id,product_id) DO UPDATE SET tier=excluded.tier,total_sold=excluded.total_sold,evidence_ref=excluded.evidence_ref,exclusion_reason=NULL' +
         ' WHERE job_seen.tier IS NULL AND excluded.tier IS NOT NULL',
     )
-      .bind(...part.flatMap(([id, item]) => [c.job.id, id, item.tier, page, item.sold, ref,item.reason]))
+      .bind(
+        ...part.flatMap(([id, item]) => [c.job.id, id, item.tier, page, item.sold, ref, item.reason]),
+      )
       .run()
   }
   const first = await c.env.DB.prepare(
@@ -418,16 +450,29 @@ export async function discoverPage(c: Context, page: number, ids: string[]): Pro
   const quotes = []
   let quoteStatus = ''
   if (s.platform === 'amazon' && matched) {
-    const asins = [...new Set(accepted.map(row => String(row.goodsId)))]
+    const asins = [...new Set(accepted.map((row) => String(row.goodsId)))]
     try {
       const { credentials } = await providerCredentials(c.env, 'amazon')
-      const offers = await new AmazonUS(credentials, undefined, c.env.DB,{owner:c.job.actor,runId:c.job.id,attempt:c.attempt}).batchOffers(asins.slice(0,20))
+      const offers = await new AmazonUS(credentials, undefined, c.env.DB, {
+        owner: c.job.actor,
+        runId: c.job.id,
+        attempt: c.attempt,
+        shouldContinue: async () => {
+          await stillActive(c)
+          return true
+        },
+        beforeSend: () => claimAssistantCall(c.env.DB, c.job.id),
+      }).batchOffers(asins.slice(0, 20))
       for (const asin of asins) {
         const offer = offers.get(asin)
-        quotes.push({ asin, price: offer?.price ?? null, shipping: offer?.shipping ?? null,
-          tier: haulPriceTier(offer?.price ?? null) })
+        quotes.push({
+          asin,
+          price: offer?.price ?? null,
+          shipping: offer?.shipping ?? null,
+          tier: haulPriceTier(offer?.price ?? null),
+        })
       }
-      quoteStatus = '已取得 ' + quotes.filter(q => q.price != null).length + ' 个官方报价'
+      quoteStatus = '已取得 ' + quotes.filter((q) => q.price != null).length + ' 个官方报价'
     } catch (error) {
       quoteStatus = error instanceof PublicError ? '待补核价：' + error.message : '官方报价待补查'
     }
@@ -451,7 +496,8 @@ export async function discoverPage(c: Context, page: number, ids: string[]): Pro
       ' 件，本页首次达标 ' +
       matched +
       ' 件。' +
-      stop + (quoteStatus ? ' · ' + quoteStatus : ''),
+      stop +
+      (quoteStatus ? ' · ' + quoteStatus : ''),
     result: {
       page,
       params,
@@ -469,7 +515,11 @@ export async function discoverPage(c: Context, page: number, ids: string[]): Pro
       reportedTotal: data.total ?? null,
       exhausted,
       stop,
-      postFilters: [potential ? '近 30 天上架或日期待核' : '累计销量', '美元价格', ...(ids.length ? ['来源类目复核'] : [])],
+      postFilters: [
+        potential ? '近 30 天上架或日期待核' : '累计销量',
+        '美元价格',
+        ...(ids.length ? ['来源类目复核'] : []),
+      ],
       strategyVersion: c.job.strategy_version,
     },
     evidenceRef: ref,
@@ -617,7 +667,7 @@ export async function followDecision(
     .first<{ evidence_ref: string }>()
   if (!basis) throw new Stop('缺少可追溯的模型响应')
   let watchCreated = false
-  if (productId) {
+  if (productId && c.input.writeWatchPool !== false) {
     const author = choice === 'research' ? 'AI · Terra' : 'AI · Decisions'
     // Automatic triage is a provisional watch item. Manual feedback remains a separate history.
     const inserted =
@@ -638,11 +688,13 @@ export async function followDecision(
   return {
     summary:
       nextAction +
-      (productId
-        ? watchCreated
-          ? '，已加入观察池。'
-          : '，已保留既有候选状态与意见。'
-        : '，请在研究范围内人工明确商品。'),
+      (c.input.writeWatchPool === false
+        ? '，本次仅分析，未写入观察池。'
+        : productId
+          ? watchCreated
+            ? '，已加入观察池。'
+            : '，已保留既有候选状态与意见。'
+          : '，请在研究范围内人工明确商品。'),
     result: {
       productId: productId ?? null,
       route: choice,

@@ -207,6 +207,44 @@ dialog.oa-dialog {
 .oa-investigation-start button {
   white-space: normal;
 }
+.oa-collaboration,
+.oa-followup,
+.oa-proposal,
+.oa-proposal-form[open] {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+.oa-collaboration {
+  margin-top: 8px;
+}
+.oa-proposal {
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper, #fff);
+}
+.oa-collaboration label {
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+}
+.oa-collaboration textarea,
+.oa-collaboration input:not([type="checkbox"]),
+.oa-collaboration select {
+  width: 100%;
+  min-width: 0;
+  font: inherit;
+  font-size: 16px;
+}
+.oa-collaboration textarea {
+  resize: vertical;
+  max-height: 140px;
+}
+.oa-collaboration summary {
+  cursor: pointer;
+  padding-block: 8px;
+}
 .oa-investigation button {
   min-height: 44px;
 }

@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { investigationUsage } from './budget'
 import { productIdSchema } from './contracts'
 import type { AssistantBindings, AssistantRunRow } from './runs'
 
@@ -125,11 +126,7 @@ export async function persistInvestigationReport(
     excluded: [],
     missing: [reason, ...facts.missing].filter(Boolean).slice(0, 30),
   }
-  const usage = await env.DB.prepare(
-    "SELECT COALESCE(SUM(COALESCE(actual,reserved)),0) aiMicros,COALESCE(SUM(CASE WHEN state!='confirmed' THEN reserved ELSE 0 END),0) unconfirmedAiMicros FROM usage_reservations WHERE assistant_run_id=?",
-  )
-    .bind(row.id)
-    .first()
+  const usage = await investigationUsage(env.DB, row.id)
   const complete = {
     version: 1,
     goal: row.goal,
@@ -143,7 +140,7 @@ export async function persistInvestigationReport(
     linkedJobs: [...facts.evidence.values()]
       .filter((e) => e.kind === 'job_report')
       .map((e) => ({ jobId: e.objectId, evidenceId: e.id })),
-    usage: { dataPoints: 0, ...usage },
+    usage,
     generatedAt: new Date().toISOString(),
   }
   const answer = [
@@ -166,11 +163,22 @@ export async function persistInvestigationReport(
     .join('\n\n')
   for (let retry = 0; retry < 3; retry++) {
     const current = await env.DB.prepare(
-      'SELECT attempt,version,status,lease_token FROM assistant_runs WHERE id=?',
+      'SELECT attempt,version,status,lease_token,scope_version FROM assistant_runs WHERE id=?',
     )
       .bind(row.id)
-      .first<{ attempt: number; version: number; status: string; lease_token: string | null }>()
-    if (!current || current.attempt !== row.attempt || current.lease_token !== row.lease_token)
+      .first<{
+        attempt: number
+        version: number
+        status: string
+        lease_token: string | null
+        scope_version: number
+      }>()
+    if (
+      !current ||
+      current.attempt !== row.attempt ||
+      current.lease_token !== row.lease_token ||
+      current.scope_version !== row.scope_version
+    )
       return false
     if (
       ['cancelled', 'succeeded', 'partial', 'failed'].includes(current.status) &&
@@ -187,7 +195,8 @@ export async function persistInvestigationReport(
             : status
     const [saved] = await env.DB.batch([
       env.DB.prepare(
-        'UPDATE assistant_runs SET status=?,report_json=?,summary=?,updated_at=?,version=version+1 WHERE id=? AND attempt=? AND version=? AND status=? AND lease_token IS ?',
+        `UPDATE assistant_runs SET status=?,report_json=?,summary=?,updated_at=?,version=version+1 WHERE id=? AND attempt=? AND version=? AND status=? AND lease_token IS ? AND scope_version=?
+        AND (? IN ('cancelled','paused','failed') OR NOT EXISTS(SELECT 1 FROM assistant_messages WHERE run_id=assistant_runs.id AND intent='continue' AND state='pending'))`,
       ).bind(
         target,
         JSON.stringify(complete),
@@ -198,8 +207,19 @@ export async function persistInvestigationReport(
         current.version,
         current.status,
         current.lease_token,
+        row.scope_version,
+        target,
       ),
-      // D1 batch is atomic: changes() refers to the guarded run UPDATE immediately above.
+      env.DB.prepare(`INSERT INTO assistant_report_versions(run_id,revision,scope_version,report_json,answer,created_at)
+        SELECT ?,?,?,?,?,? WHERE changes()=1`).bind(
+        row.id,
+        current.version + 1,
+        row.scope_version,
+        JSON.stringify(complete),
+        answer,
+        complete.generatedAt,
+      ),
+      // Atomic batch: the history INSERT succeeds only after the guarded run UPDATE.
       env.DB.prepare(
         'UPDATE assistant_turns SET answer=?,issue=NULL WHERE changes()=1 AND conversation_id=? AND id=? AND EXISTS(SELECT 1 FROM assistant_conversations WHERE id=? AND account_id=?)',
       ).bind(answer, row.conversation_id, row.origin_turn_id, row.conversation_id, row.account_id),

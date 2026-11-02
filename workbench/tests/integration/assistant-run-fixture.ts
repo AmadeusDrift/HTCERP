@@ -61,13 +61,18 @@ export function investigationFixture() {
     ARCHIVE: {
       get: vi.fn(async (key: string) =>
         archive.has(key)
-          ? { size: archive.get(key)!.length, text: async () => archive.get(key)! }
+          ? {
+              size: archive.get(key)!.length,
+              text: async () => archive.get(key)!,
+              json: async () => JSON.parse(archive.get(key)!),
+            }
           : null,
       ),
       put: vi.fn(async (key: string, value: string) => {
         archive.set(key, value)
         return { key }
       }),
+      head: vi.fn(async (key: string) => (archive.has(key) ? { key } : null)),
     },
     ASSISTANT_RUNNER: { create },
     RUNNER: {},

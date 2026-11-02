@@ -57,6 +57,32 @@ async function fixture(request) {
   }
   if (url.origin === issuer && url.pathname === '/cdn-cgi/access/certs')
     return Response.json({ keys: [jwk] })
+  if (url.origin === 'https://openapi.geekbi.com' && url.pathname.endsWith('/goods/detail'))
+    return Response.json(
+      {
+        code: 0,
+        data: {
+          goods: {
+            goodsId: '1',
+            goodsName: '量匙更新',
+            goodsNameEn: 'Measuring Spoon Set, 2 Pieces',
+            minPrice: 4,
+            sold: 51000,
+            siteId: 48,
+          },
+          history: [],
+        },
+      },
+      { headers: { 'x-gb-price-points': '10' } },
+    )
+  if (url.origin === 'https://openapi.geekbi.com' && url.pathname.endsWith('/review/search'))
+    return Response.json(
+      {
+        code: 0,
+        data: { total: 1, list: [{ goodsId: '1', score: 1, comment: 'Handle broke after first use.' }] },
+      },
+      { headers: { 'x-gb-price-points': '10' } },
+    )
   if (url.origin === 'https://openapi.geekbi.com' && url.pathname.endsWith('/goods/search')) {
     assert.equal(request.headers.get('X-GB-App-Key'), 'workflow-fixture-app-key')
     assert.equal(url.searchParams.get('siteId'), '48')
@@ -112,6 +138,12 @@ async function fixture(request) {
     const body = await request.json()
     assert.equal(body.model, 'openai/gpt-6.1-terra')
     const state = JSON.parse(body.messages[1].content)
+    if (Array.isArray(state))
+      return Response.json({
+        model: body.model,
+        choices: [{ message: { content: '样本1反映把手耐用性问题，不能外推全部买家。' } }],
+        usage: { cost: 0.00002 },
+      })
     if (Array.isArray(state.observations)) {
       assistantModelCalls++
       if (state.goal === 'runtime-cancel' || state.goal === 'runtime-pause') await delay(250)
@@ -126,7 +158,8 @@ async function fixture(request) {
               : {
                   type: 'report',
                   report: {
-                    summary: '持久调查已完成缓存比较。',
+                    summary:
+                      state.scopeVersion > 1 ? '已按补充条件继续原调查。' : '持久调查已完成缓存比较。',
                     recommendations: [
                       {
                         productId: 'temu:US:1',
@@ -428,6 +461,7 @@ try {
     assert.ok(await bucket.head(modelStep.evidence_ref))
   const transcript = await (await memberGet('/assistant/conversations/' + conversationId)).json()
   assert.match(transcript.items[0].answer, /temu:US:1/)
+  assert.equal(transcript.items[0].runStatus, 'succeeded')
   assert.equal((await (await createInvestigation()).json()).runId, investigation.runId)
   assert.equal(assistantModelCalls, 4)
   async function controlledInvestigation(goal) {
@@ -488,6 +522,104 @@ try {
     .all()
   assert.deepEqual(cancelledUsage.results, [{ state: 'confirmed', actual: 10 }])
   assert.ok(JSON.parse(cancelled.report_json).missing.length)
+  const followupId = crypto.randomUUID()
+  const steered = await json(
+    '/assistant/investigations/' + investigation.runId + '/messages',
+    { id: followupId, message: '继续刚才，优先核对尺寸', intent: 'continue' },
+    readerCookie,
+  )
+  assert.equal(steered.status, 200, await steered.clone().text())
+  const continued = await assistantUntil(investigation.runId, ['succeeded', 'partial', 'failed'])
+  assert.equal(continued.scope_version, 2, JSON.stringify(continued))
+  assert.match(JSON.parse(continued.report_json).summary, /补充条件/)
+  const versions = await db
+    .prepare('SELECT * FROM assistant_report_versions WHERE run_id=? ORDER BY revision')
+    .bind(investigation.runId)
+    .all()
+  assert.equal(versions.results.length, 2)
+  assert.match(JSON.parse(versions.results[0].report_json).summary, /缓存比较/)
+  assert.equal(
+    (
+      await json(
+        '/assistant/investigations/' + investigation.runId + '/messages',
+        { id: followupId, message: '继续刚才，优先核对尺寸', intent: 'continue' },
+        readerCookie,
+      )
+    ).status,
+    200,
+  )
+  const freshStrategy = await (
+    await secure.fetch(site + '/api/strategy', { headers: { Cookie: ownerCookie } })
+  ).json()
+  const adjusted = await json(
+    '/strategy',
+    {
+      baseVersion: freshStrategy.version,
+      settings: { ...freshStrategy.settings, dataDailyPoints: 100, aiDailyMicros: 1000000 },
+    },
+    ownerCookie,
+  )
+  assert.equal(adjusted.status, 200, await adjusted.clone().text())
+  const onlineResponse = await json(
+    '/assistant/conversations/' + crypto.randomUUID() + '/investigations',
+    { id: crypto.randomUUID(), question: 'runtime-online', page: '商品库' },
+    ownerCookie,
+  )
+  assert.equal(onlineResponse.status, 200, await onlineResponse.clone().text())
+  const online = await onlineResponse.json()
+  await assistantUntil(online.runId, ['succeeded'])
+  const proposalResponse = await json(
+    '/assistant/investigations/' + online.runId + '/proposals',
+    {
+      maxDataPoints: 20,
+      maxAiMicros: 360000,
+      actions: [
+        {
+          operation: 'product_refresh',
+          productId: 'temu:US:1',
+          calls: 1,
+          maxDataPoints: 10,
+          maxAiMicros: 0,
+        },
+        {
+          operation: 'reviews_refresh',
+          productId: 'temu:US:1',
+          calls: 2,
+          maxDataPoints: 10,
+          maxAiMicros: 30000,
+        },
+      ],
+    },
+    ownerCookie,
+  )
+  assert.equal(proposalResponse.status, 200, await proposalResponse.clone().text())
+  const proposal = await proposalResponse.json(),
+    confirmPath = '/assistant/investigations/' + online.runId + '/proposals/' + proposal.id + '/confirm'
+  const confirmations = await Promise.all([
+    json(confirmPath, {}, ownerCookie),
+    json(confirmPath, {}, ownerCookie),
+  ])
+  for (const response of confirmations) assert.equal(response.status, 200, await response.clone().text())
+  const onlineDone = await assistantUntil(online.runId, ['succeeded', 'partial', 'failed'])
+  assert.equal(onlineDone.status, 'succeeded', JSON.stringify(onlineDone))
+  const links = await db
+    .prepare('SELECT state,job_id FROM assistant_job_links WHERE run_id=?')
+    .bind(online.runId)
+    .all()
+  assert.equal(links.results.length, 2)
+  assert.ok(links.results.every((l) => l.state === 'settled' && l.job_id))
+  const onlineUsage = await db
+    .prepare(
+      'SELECT unit,SUM(actual) n FROM usage_reservations WHERE assistant_run_id=? GROUP BY unit ORDER BY unit',
+    )
+    .bind(online.runId)
+    .all()
+  assert.deepEqual(onlineUsage.results, [
+    { unit: 'micros', n: 70 },
+    { unit: 'points', n: 20 },
+  ])
+  assert.equal(calls.filter((p) => p.endsWith('/goods/detail')).length, 1)
+  assert.equal(calls.filter((p) => p.endsWith('/review/search')).length, 1)
   assert.equal(
     (await json('/accounts/' + viewer.id, { active: false }, ownerCookie, 'PATCH')).status,
     200,
@@ -497,7 +629,7 @@ try {
     401,
   )
   console.log(
-    'Workerd fixture passed: research and cached AssistantWorkflow, owned original-turn report, duplicate submission, pause/resume, cancellation, D1/R2 and confirmed usage.',
+    'Workerd fixture passed: research, cached and authorized online investigation, bounded product/reviews refresh, total ledger, original-turn followups and report history, duplicate confirmations, pause/resume and cancellation.',
   )
 } finally {
   await mf.dispose()

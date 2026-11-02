@@ -1,7 +1,7 @@
-import { potentialScope } from './potential-scope'
 import { z } from 'zod'
 import { type ConnectionBindings, connectionStatus } from '../connections/credentials'
 import { PublicError } from '../contracts/errors'
+import { potentialScope } from './potential-scope'
 
 export interface OpsBindings extends ConnectionBindings {
   ARCHIVE: R2Bucket
@@ -32,7 +32,7 @@ export const settingsSchema = z
     researchLimit: bounded(3).default(0),
     dataDailyPoints: bounded(100_000),
     aiDailyMicros: bounded(100_000_000),
-    schedulePreset: z.enum(['potential','custom']).optional(),
+    schedulePreset: z.enum(['potential', 'custom']).optional(),
     scheduleEnabled: z.boolean(),
     scheduleTime: z.string().regex(/^(?:([01]\d|2[0-3]):[0-5]\d)?$/),
   })
@@ -40,7 +40,9 @@ export const settingsSchema = z
   .refine(
     (s) =>
       !s.scheduleEnabled ||
-      (s.scheduleTime !== '' && s.dataDailyPoints >= 10 && (s.platform === 'amazon' || s.schedulePreset === 'potential' || !!(s.categoryId || s.keyword))),
+      (s.scheduleTime !== '' &&
+        s.dataDailyPoints >= 10 &&
+        (s.platform === 'amazon' || s.schedulePreset === 'potential' || !!(s.categoryId || s.keyword))),
     '开启自动调度需要北京时间、类目或关键词和至少 10 积分的日预算',
   )
 export type Settings = z.infer<typeof settingsSchema>
@@ -58,6 +60,7 @@ export const inputsSchema = z
     maxDataPoints: bounded(100_000).optional(),
     maxAiMicros: bounded(100_000_000).optional(),
     imageId: z.uuid().optional(),
+    writeWatchPool: z.boolean().optional(),
   })
   .strict()
   .refine((i) => !i.imageId || !!i.productId, '参考图需要关联已选商品')
@@ -71,12 +74,15 @@ export const createSchema = z
       .optional(),
   })
   .strict()
-  .refine(j => !j.inputs.preset || j.kind === 'discovery', '潜力新品预设仅适用于发现任务')
+  .refine((j) => !j.inputs.preset || j.kind === 'discovery', '潜力新品预设仅适用于发现任务')
   .refine(
     (j) => j.kind === 'discovery' || !!(j.inputs.goal || j.inputs.productId || j.inputs.keyword),
     '请指定商品或研究目标',
   )
-export type JobInput = z.infer<typeof inputsSchema>
+export type JobInput = z.infer<typeof inputsSchema> & {
+  assistantLinkId?: string
+  operation?: 'product_refresh' | 'amazon_backfill' | 'reviews_refresh'
+}
 export type NewJob = z.infer<typeof createSchema>
 export type JobRow = {
   id: string
@@ -121,9 +127,10 @@ export async function getRun(db: D1Database, id: string) {
   return row
 }
 export function effective(settings: Settings, input: JobInput): Settings {
-  if (input.preset === 'potential') return { ...settings, ...potentialScope, tiers: [0], focusLimit: 0, researchLimit: 0 }
+  if (input.preset === 'potential')
+    return { ...settings, ...potentialScope, tiers: [0], focusLimit: 0, researchLimit: 0 }
   // Only the discovery scope can be overridden by a manual run.
-  return {
+  const result = {
     ...settings,
     ...Object.fromEntries(
       Object.keys(scope)
@@ -131,6 +138,8 @@ export function effective(settings: Settings, input: JobInput): Settings {
         .map((k) => [k, input[k as keyof JobInput]]),
     ),
   }
+  // Assistant discovery never silently launches unallocated research or focus refreshes.
+  return input.assistantLinkId ? { ...result, focusLimit: 0, researchLimit: 0 } : result
 }
 export async function sourceConfigured(env: OpsBindings) {
   const { geekbi, openrouter } = await connectionStatus(env)

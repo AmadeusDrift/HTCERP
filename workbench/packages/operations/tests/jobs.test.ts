@@ -125,24 +125,43 @@ async function createDiscovery(requestId = 'demo', ai?: number) {
 }
 describe('operations fixture', () => {
   it('discovers Amazon ASINs across pages and checks shortlisted ASINs at the official price', async () => {
-    await settings({ platform: 'amazon', categoryId: '', keyword: '', tiers: [0], maxPrice: 4, dataDailyPoints: 50 })
+    await settings({
+      platform: 'amazon',
+      categoryId: '',
+      keyword: '',
+      tiers: [0],
+      maxPrice: 4,
+      dataDailyPoints: 50,
+    })
     const ctx = await createDiscovery('amazon-broad')
     const asin = 'B0H8YRXHGJ'
     const { AmazonUS } = await import('../../amazon/adapter')
-    const quotes = vi.spyOn(AmazonUS.prototype,'batchOffers').mockResolvedValue(new Map([[asin,{price:3.99,currency:'USD',shipping:0}]]))
-    vi.stubGlobal('fetch', vi.fn(async (req: Request) => {
-      const url = new URL(req.url)
-      expect(url.pathname).toBe('/api/v2/data/amazon/goods/search')
-      expect(url.searchParams.get('priceMax')).toBe('4')
-      expect(url.searchParams.get('siteId')).toBe('1')
-      return page([{ goodsId: asin, goodsName: 'Peeler', minPrice: 3.5, monthSold: 100 },
-        { goodsId: 'B0ZZZZZZZZ', goodsName: 'Over budget', minPrice: 6 }])
-    }))
-    const result = await discoverPage(ctx,1,[])
-    expect(result.result.quotes).toMatchObject([{ asin, price:3.99, tier:'大概率属于低价商城，优先考虑' }])
-    await discoverPage(ctx,2,[])
+    const quotes = vi
+      .spyOn(AmazonUS.prototype, 'batchOffers')
+      .mockResolvedValue(new Map([[asin, { price: 3.99, currency: 'USD', shipping: 0 }]]))
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (req: Request) => {
+        const url = new URL(req.url)
+        expect(url.pathname).toBe('/api/v2/data/amazon/goods/search')
+        expect(url.searchParams.get('priceMax')).toBe('4')
+        expect(url.searchParams.get('siteId')).toBe('1')
+        return page([
+          { goodsId: asin, goodsName: 'Peeler', minPrice: 3.5, monthSold: 100 },
+          { goodsId: 'B0ZZZZZZZZ', goodsName: 'Over budget', minPrice: 6 },
+        ])
+      }),
+    )
+    const result = await discoverPage(ctx, 1, [])
+    expect(result.result.quotes).toMatchObject([
+      { asin, price: 3.99, tier: '大概率属于低价商城，优先考虑' },
+    ])
+    await discoverPage(ctx, 2, [])
     expect(quotes).toHaveBeenCalledWith([asin])
-    expect(await researchQueue(env.DB,ctx.job.id,1,10)).toMatchObject({total:1,items:[{productId:'amazon:US:'+asin,totalSold:null}]})
+    expect(await researchQueue(env.DB, ctx.job.id, 1, 10)).toMatchObject({
+      total: 1,
+      items: [{ productId: 'amazon:US:' + asin, totalSold: null }],
+    })
   })
   it('advances to the next product across daily runs and charges only the original parent for reused reports', async () => {
     await settings({ dataDailyPoints: 100, aiDailyMicros: 100_000, researchLimit: 1 })
@@ -544,7 +563,7 @@ describe('operations fixture', () => {
     },
   )
   it('keeps cached review evidence readable at zero budget and retries a model issue without repurchasing reviews', async () => {
-    await settings({ dataDailyPoints: 10 })
+    await settings({ dataDailyPoints: 10, aiDailyMicros: 60000 })
     const fetched = vi
       .fn()
       .mockResolvedValueOnce(
@@ -556,10 +575,13 @@ describe('operations fixture', () => {
     vi.stubGlobal('fetch', fetched)
     const gateway = vi
       .fn()
-      .mockResolvedValueOnce(Response.json({ error: { message: 'access denied' } }, { status: 403 }))
+      .mockResolvedValueOnce(
+        Response.json({ error: { message: 'access denied' }, usage: { cost: 0 } }, { status: 403 }),
+      )
       .mockResolvedValueOnce(
         Response.json({
           model: 'fixture-model',
+          usage: { cost: 0.00001 },
           choices: [{ message: { content: '评论 1 提到刮痕。' } }],
         }),
       )
@@ -877,26 +899,34 @@ describe('operations fixture', () => {
     const asOf = new Date().toISOString()
     const ago = (days: number) => new Date(Date.now() - days * 86400000).toISOString()
     expect((await potentialProducts(env.DB, asOf, 1, 20)).total).toBe(0)
-    await settings({ dataDailyPoints: 10, scheduleEnabled: true, scheduleTime: '00:00', schedulePreset: 'potential' })
+    await settings({
+      dataDailyPoints: 10,
+      scheduleEnabled: true,
+      scheduleTime: '00:00',
+      schedulePreset: 'potential',
+    })
     await runSchedule(env, Date.now())
     const run = sql.prepare("SELECT id FROM job_runs WHERE actor='scheduler'").get()!
     const ctx = await active(String(run.id))
     expect(ctx.input.preset).toBe('potential')
-    vi.stubGlobal('fetch', vi.fn(async (req: Request) => {
-      expect(new URL(req.url).searchParams.get('sort')).toBe('onSaleTime')
-      return page([
-        { ...goods('1', 10), onSaleTime: ago(10), updateTime: asOf, daySold: 4, weekSold: 8 },
-        { ...goods('2', 30), onSaleTime: ago(31), daySold: 2 },
-        { ...goods('3', null), daySold: 2 },
-        { ...goods('4', 2), onSaleTime: ago(1), updateTime: asOf, daySold: 1, weekSold: 2 },
-      ])
-    }))
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (req: Request) => {
+        expect(new URL(req.url).searchParams.get('sort')).toBe('onSaleTime')
+        return page([
+          { ...goods('1', 10), onSaleTime: ago(10), updateTime: asOf, daySold: 4, weekSold: 8 },
+          { ...goods('2', 30), onSaleTime: ago(31), daySold: 2 },
+          { ...goods('3', null), daySold: 2 },
+          { ...goods('4', 2), onSaleTime: ago(1), updateTime: asOf, daySold: 1, weekSold: 2 },
+        ])
+      }),
+    )
     await discoverPage(ctx, 1, ['9711'])
     const now = new Date().toISOString()
     const first = await potentialProducts(env.DB, now, 1, 20)
-    expect(first.items.map(p=>p.grade)).toEqual(['priority','unknown','undated'])
+    expect(first.items.map((p) => p.grade)).toEqual(['priority', 'unknown', 'undated'])
     const filtered = await potentialProducts(env.DB, now, 5, 1, 'priority', first.items[0].category)
-    expect(filtered).toMatchObject({total:1, page:1, items:[{id:'temu:US:1'}]})
+    expect(filtered).toMatchObject({ total: 1, page: 1, items: [{ id: 'temu:US:1' }] })
   })
   it('refreshes only selected watch products and preserves gaps and zero in historical evidence', async () => {
     await settings({ dataDailyPoints: 30, focusLimit: 1 })

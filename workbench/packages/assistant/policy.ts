@@ -73,3 +73,8 @@ export function sanitizeToolData(
   }
   return clean(memberStepResult(value)) as Record<string, unknown>
 }
+export const privateEvidenceLostSql = (
+  runExpression: string,
+) => `EXISTS(SELECT 1 FROM assistant_steps ps JOIN assistant_runs pr ON pr.id=ps.run_id
+ WHERE ps.run_id=${runExpression} AND ps.kind='tool' AND ps.name='read_job' AND ps.status='completed' AND json_extract(ps.result_json,'$.status') IN ('ok','partial','empty')
+ AND NOT EXISTS(SELECT 1 FROM job_runs pj JOIN accounts pa ON pa.id=pr.account_id WHERE pj.id=json_extract(ps.input_json,'$.jobId') AND pj.actor=pa.username AND pa.active=1))`

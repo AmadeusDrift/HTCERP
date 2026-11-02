@@ -75,7 +75,10 @@ test('uses current filters and objects, controls an investigation and restores i
           usage: { dataPoints: 0, aiMicros: 3000, unconfirmedAiMicros: 1000 },
           limits: { aiMicros: 360000 },
           summary: '已读取 3 件已有商品',
-          answer: status === 'cancelled' ? '<script>unsafe</script> 部分结果已保存' : null,
+          answer:
+            status === 'cancelled'
+              ? '<script>unsafe</script> 部分结果已保存\n资料缺口：缺少尺寸信息'
+              : null,
           report:
             status === 'cancelled'
               ? {

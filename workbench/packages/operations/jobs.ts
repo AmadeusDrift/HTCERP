@@ -89,10 +89,10 @@ export async function listJobs(
   status: string,
   page: number,
   pageSize: number,
-  owner?:string,
+  owner?: string,
 ) {
-  const where = "WHERE (?='' OR kind=?) AND (?='' OR status=?)"+(owner?' AND actor=?':''),
-    params = [kind, kind, status, status,...(owner?[owner]:[])]
+  const where = "WHERE (?='' OR kind=?) AND (?='' OR status=?)" + (owner ? ' AND actor=?' : ''),
+    params = [kind, kind, status, status, ...(owner ? [owner] : [])]
   const [count, rows] = await db.batch([
     db.prepare('SELECT COUNT(*) AS n FROM job_runs ' + where).bind(...params),
     db
@@ -137,11 +137,16 @@ async function setupRun(env: OpsBindings, job: JobRow) {
       .run()
   }
   try {
-    if (input.mode === 'live' && (!['temu','amazon'].includes(s.platform) || (input.productId && !/^(temu|amazon):/.test(input.productId)))) {
+    if (
+      input.mode === 'live' &&
+      (!['temu', 'amazon'].includes(s.platform) ||
+        (input.productId && !/^(temu|amazon):/.test(input.productId)))
+    ) {
       throw bad('当前仅开放 Temu、Amazon 美国站在线选品。')
     }
+    const specialized = !!input.operation
     let saved = await storedResult(env.DB, job.id, 'plan')
-    if (!saved) {
+    if (!saved && !['product_refresh', 'reviews_refresh'].includes(input.operation ?? '')) {
       const plan = await cachedPlan(env.DB, job, input, s)
       await saveStep(env.DB, job.id, 'plan', '缓存证据与执行计划', 'succeeded', plan)
       saved = plan.result
@@ -150,16 +155,29 @@ async function setupRun(env: OpsBindings, job: JobRow) {
       await mark(
         'succeeded',
         '缓存复核已完成。范围内 ' +
-          saved.sampled +
+          saved?.sampled +
           ' 件，分层达标 ' +
-          saved.matched +
+          saved?.matched +
           ' 件；本次未调用外部来源或模型。',
       )
       return
     }
     const connect = await sourceConfigured(env)
     const reasons = []
-    if (job.kind === 'discovery') {
+    if (specialized) {
+      if (
+        (input.operation === 'product_refresh' ||
+          (input.operation === 'reviews_refresh' && input.productId?.startsWith('temu:'))) &&
+        !connect.geekbi
+      )
+        reasons.push('商品数据服务待配置')
+      if (
+        input.operation === 'reviews_refresh' &&
+        input.productId?.startsWith('temu:') &&
+        !connect.openrouter
+      )
+        reasons.push('OpenRouter 待配置')
+    } else if (job.kind === 'discovery') {
       if (s.platform !== 'amazon' && !s.categoryId && !s.keyword) reasons.push('需要供应商类目或关键词')
       if (!connect.geekbi) reasons.push('极鲸云待配置')
       if (Math.min(s.dataDailyPoints, input.maxDataPoints ?? Infinity) < 10) reasons.push('积分预算不足')
@@ -199,11 +217,12 @@ export async function createJob(
   actor: string,
   lease?: string,
   parent?: JobRow,
+  assistantLinkId?: string,
 ) {
   const { version } = await currentStrategy(env.DB, parent?.strategy_version)
   const id = crypto.randomUUID(),
     time = now(),
-    input = JSON.stringify(spec.inputs)
+    input = JSON.stringify({ ...spec.inputs, ...(assistantLinkId ? { assistantLinkId } : {}) })
   const key =
     lease ??
     actor +
@@ -212,10 +231,33 @@ export async function createJob(
   const title = (
     spec.inputs.goal || (spec.kind === 'discovery' ? '条件发现与重点更新' : '指定商品研究')
   ).slice(0, 100)
-  await env.DB.prepare(`INSERT INTO job_runs(id,kind,status,title,strategy_version,inputs_json,actor,request_key,created_at,updated_at,parent_id)
-    VALUES(?,?,'queued',?,?,?,?,?,?,?,?) ON CONFLICT(request_key) DO NOTHING`)
-    .bind(id, spec.kind, title, version, input, actor, key, time, time, parent?.id ?? null)
-    .run()
+  const insert =
+    env.DB.prepare(`INSERT INTO job_runs(id,kind,status,title,strategy_version,inputs_json,actor,request_key,created_at,updated_at,parent_id)
+    SELECT ?1,?2,'queued',?3,?4,?5,?6,?7,?8,?8,?9 WHERE ?10 IS NULL OR EXISTS(
+      SELECT 1 FROM assistant_job_links l JOIN assistant_runs r ON r.id=l.run_id JOIN assistant_proposals p ON p.id=l.proposal_id JOIN accounts a ON a.id=r.account_id
+      WHERE l.id=?10 AND l.state IN ('pending','submitted','uncertain') AND a.username=?6 AND a.active=1 AND a.role IN ('operator','admin')
+      AND (l.operation!='reviews_refresh' OR a.role='admin') AND EXISTS(SELECT 1 FROM assistant_conversations WHERE id=r.conversation_id AND account_id=r.account_id) AND l.scope_version=r.scope_version AND p.scope_version=r.scope_version AND p.status='confirmed' AND p.expires_at>?8
+      AND r.status IN ('queued','running','waiting_jobs') AND NOT EXISTS(SELECT 1 FROM assistant_messages WHERE run_id=r.id AND state='pending' AND intent='continue'))
+    ON CONFLICT(request_key) DO NOTHING`).bind(
+      id,
+      spec.kind,
+      title,
+      version,
+      input,
+      actor,
+      key,
+      time,
+      parent?.id ?? null,
+      assistantLinkId ?? null,
+    )
+  if (assistantLinkId)
+    await env.DB.batch([
+      insert,
+      env.DB.prepare(
+        "UPDATE assistant_job_links SET job_id=(SELECT id FROM job_runs WHERE request_key=?),state='submitted',updated_at=? WHERE id=? AND EXISTS(SELECT 1 FROM job_runs WHERE request_key=?)",
+      ).bind(key, time, assistantLinkId, key),
+    ])
+  else await insert.run()
   const job = await env.DB.prepare('SELECT * FROM job_runs WHERE request_key=?')
     .bind(key)
     .first<JobRow>()
@@ -263,7 +305,7 @@ export async function runSchedule(env: OpsBindings, time: number) {
   const { settings: s } = await currentStrategy(env.DB),
     local = businessClock(time)
   if (!s.scheduleEnabled || !s.scheduleTime || local.slice(11, 16) < s.scheduleTime) return
-  if (s.schedulePreset !== 'potential' && !['temu','amazon'].includes(s.platform)) return
+  if (s.schedulePreset !== 'potential' && !['temu', 'amazon'].includes(s.platform)) return
   const key = 'cron:daily:US:' + local.slice(0, 10)
   // Catch up a missed minute until the end of the same business day.
   const prior = await env.DB.prepare('SELECT id,status FROM job_runs WHERE request_key=?')
@@ -273,7 +315,9 @@ export async function runSchedule(env: OpsBindings, time: number) {
     if (prior.status === 'queued') await setupRun(env, await getRun(env.DB, prior.id))
     return
   }
-  const inputs: JobInput = s.schedulePreset === 'potential'
-    ? { mode: 'live', preset: 'potential', goal: '团队默认 · 潜力新品' } : { mode: 'live' }
+  const inputs: JobInput =
+    s.schedulePreset === 'potential'
+      ? { mode: 'live', preset: 'potential', goal: '团队默认 · 潜力新品' }
+      : { mode: 'live' }
   await createJob(env, { kind: 'discovery', inputs }, 'scheduler', key)
 }

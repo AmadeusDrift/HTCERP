@@ -4,6 +4,7 @@ import { memberDiagnostic } from '../contracts/presentation'
 import { businessClock } from '../operations/model'
 import { bounds } from '../operations/providers'
 import { cleanResearchJpeg } from '../research-images/jpeg'
+import { dailyOutstandingAllocationSql } from './budget'
 
 export const turnSchema = z
   .object({
@@ -74,7 +75,7 @@ export function sanitizeImage(image?: string) {
 
 // This predicate is evaluated in the INSERT itself so job and chat reservations cannot race.
 const canSpend = `NOT EXISTS(SELECT 1 FROM usage_reservations WHERE unit='micros' AND business_date=?1 AND actual>reserved)
-  AND ?2+(SELECT COALESCE(SUM(COALESCE(actual,reserved)),0) FROM usage_reservations WHERE unit='micros' AND business_date=?1)
+  AND ?2+(SELECT COALESCE(SUM(COALESCE(actual,reserved)),0) FROM usage_reservations WHERE unit='micros' AND business_date=?1)+${dailyOutstandingAllocationSql('micros', '?1')}
   <= (SELECT json_extract(settings_json,'$.aiDailyMicros') FROM strategy_versions ORDER BY version DESC LIMIT 1)`
 export function budgetCheck(db: D1Database, directKey?: string) {
   const day = businessClock().slice(0, 10)

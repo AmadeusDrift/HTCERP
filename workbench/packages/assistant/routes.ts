@@ -19,17 +19,18 @@ import {
   turnSchema,
   workspaceContext,
 } from './model'
+import { privateEvidenceLostSql } from './policy'
 import { dailyTasks } from './tasks'
 
 const noModel = '运营助手尚未连接 AI 模型，请联系管理员完成配置。'
 const noAccount = '请先创建并登录工作账号，再使用个人对话。'
 const pageSize = 25
-const projection = `id,question,answer,
+const projection = `id,question,CASE WHEN ${privateEvidenceLostSql("json_extract(assistant_turns.context_json,'$.runId')")} THEN '任务查看权限已变化，旧报告暂不可展示，请重新调查。' ELSE answer END answer,
   CASE WHEN answer IS NULL AND issue IS NULL AND json_extract(context_json,'$.runId') IS NULL AND created_at<strftime('%Y-%m-%dT%H:%M:%fZ','now','-3 minutes')
     THEN '回复中断，可以重新提问。' ELSE issue END issue,
   image_url IS NOT NULL hasImage,created_at createdAt,json_extract(context_json,'$.page') page,
   json_type(context_json,'$.plan') IS NOT NULL hasPlan,json_extract(context_json,'$.jobId') jobId,json_extract(context_json,'$.runId') runId,
-  (SELECT status FROM assistant_runs WHERE id=json_extract(context_json,'$.runId')) runStatus`
+  (SELECT status FROM assistant_runs WHERE id=json_extract(assistant_turns.context_json,'$.runId')) runStatus`
 async function owner(db: D1Database, id: string, accountId: string) {
   if (
     !(await db

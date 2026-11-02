@@ -1,7 +1,9 @@
 import { z } from 'zod'
+import { type DispatchIdentity, dispatch } from '../operations/service-queue'
 import { acquireSlot, observeLimit, pacedOperation } from './request-pacing'
-import { dispatch, type DispatchIdentity } from '../operations/service-queue'
-type PublicQuote = {price:number|null;currency:string|null;shipping:number|null}
+
+type PublicQuote = { price: number | null; currency: string | null; shipping: number | null }
+
 import { redactJson } from '../connections/credentials'
 import { PublicError } from '../contracts/errors'
 import { skuIsJit } from '../store-sales/report'
@@ -103,17 +105,22 @@ export class AmazonUS {
     private readonly secrets: AmazonSecrets,
     private readonly send: typeof fetch = (input, init) => fetch(input, init),
     private readonly pacingDB?: D1Database,
-    private readonly caller: DispatchIdentity = {owner:'interactive'},
+    private readonly caller: DispatchIdentity = { owner: 'interactive' },
   ) {}
   private async json(url: URL | string, init: RequestInit = {}): Promise<unknown> {
     const operation = pacedOperation(url)
     if (operation && this.pacingDB) await acquireSlot(this.pacingDB, operation)
-    if(operation && this.pacingDB && this.caller.attempt!==undefined){
-      const active=await this.pacingDB.prepare("SELECT 1 FROM job_runs WHERE id=? AND attempt=? AND status='running'")
-        .bind(this.caller.runId!,this.caller.attempt).first()
-      if(!active) throw new PublicError('CONFLICT','任务已暂停或取消。',409)
+    if (operation && this.pacingDB && this.caller.attempt !== undefined) {
+      const active = await this.pacingDB
+        .prepare("SELECT 1 FROM job_runs WHERE id=? AND attempt=? AND status='running'")
+        .bind(this.caller.runId!, this.caller.attempt)
+        .first()
+      if (!active) throw new PublicError('CONFLICT', '任务已暂停或取消。', 409)
     }
     let response: Response
+    if (this.caller.shouldContinue && !(await this.caller.shouldContinue()))
+      throw new PublicError('CONFLICT', '任务授权已变化，未发送请求。', 409)
+    await this.caller.beforeSend?.()
     try {
       response = await this.send(url, {
         ...init,
@@ -123,7 +130,8 @@ export class AmazonUS {
     } catch {
       throw new PublicError('SOURCE_UNAVAILABLE', 'Amazon 请求超时或连接失败。', 503, 'amazon', true)
     }
-    if (operation && this.pacingDB) await observeLimit(this.pacingDB, operation, response.headers, response.status === 429)
+    if (operation && this.pacingDB)
+      await observeLimit(this.pacingDB, operation, response.headers, response.status === 429)
     if (!response.ok) throw sourceError(response.status)
     return response.json().catch(() => {
       throw invalid()
@@ -273,10 +281,14 @@ export class AmazonUS {
     if (!/^[A-Z0-9]{10}$/.test(asin)) throw new PublicError('INVALID_INPUT', '子 ASIN 格式无效。', 400)
     const url = new URL('/customerFeedback/2024-06-01/items/' + asin + '/reviews/topics', origin)
     url.search = new URLSearchParams({ marketplaceId: market, sortBy: 'MENTIONS' }).toString()
+    const token = await this.authorize()
+    if (this.caller.shouldContinue && !(await this.caller.shouldContinue()))
+      throw new PublicError('CONFLICT', '任务授权已变化，未发送请求。', 409)
+    await this.caller.beforeSend?.()
     const response = await this.send(url, {
       redirect: 'manual',
       signal: AbortSignal.timeout(12000),
-      headers: { 'x-amz-access-token': await this.authorize(), 'user-agent': 'SelectionWorkbench/0.1' },
+      headers: { 'x-amz-access-token': token, 'user-agent': 'SelectionWorkbench/0.1' },
     })
     if (response.status === 204) return { asin, topics: [], period: null }
     if (response.status === 403)
@@ -318,26 +330,33 @@ export class AmazonUS {
     }
   }
   async test() {
-    const check=()=>this.searchCatalog('desk organizer',1)
-    if(this.pacingDB) await dispatch(this.pacingDB,'catalog',this.caller,check)
+    const check = () => this.searchCatalog('desk organizer', 1)
+    if (this.pacingDB) await dispatch(this.pacingDB, 'catalog', this.caller, check)
     else await check()
   }
   async search(query: string, pageSize = 6, pageToken?: string) {
-    const read=()=>this.searchCatalog(query,pageSize,pageToken)
-    const db=this.pacingDB
-    if(!db) return read()
-    return dispatch(db,'catalog',this.caller,async()=>{
-      const key=JSON.stringify([market,query,pageSize,pageToken??null])
-      const cached=await db.prepare('SELECT result FROM public_amazon_searches WHERE query_key=? AND checked_at>unixepoch()-300')
-        .bind(key).first<{result:string}>()
-      if(cached) return JSON.parse(cached.result) as Awaited<ReturnType<typeof read>>
-      const result=await read()
-      await db.prepare(`INSERT INTO public_amazon_searches VALUES(?,?,unixepoch()) ON CONFLICT(query_key)
-        DO UPDATE SET result=excluded.result,checked_at=excluded.checked_at`).bind(key,JSON.stringify(result)).run()
+    const read = () => this.searchCatalog(query, pageSize, pageToken)
+    const db = this.pacingDB
+    if (!db) return read()
+    return dispatch(db, 'catalog', this.caller, async () => {
+      const key = JSON.stringify([market, query, pageSize, pageToken ?? null])
+      const cached = await db
+        .prepare(
+          'SELECT result FROM public_amazon_searches WHERE query_key=? AND checked_at>unixepoch()-300',
+        )
+        .bind(key)
+        .first<{ result: string }>()
+      if (cached) return JSON.parse(cached.result) as Awaited<ReturnType<typeof read>>
+      const result = await read()
+      await db
+        .prepare(`INSERT INTO public_amazon_searches VALUES(?,?,unixepoch()) ON CONFLICT(query_key)
+        DO UPDATE SET result=excluded.result,checked_at=excluded.checked_at`)
+        .bind(key, JSON.stringify(result))
+        .run()
       return result
     })
   }
-  private async searchCatalog(query:string,pageSize:number,pageToken?:string) {
+  private async searchCatalog(query: string, pageSize: number, pageToken?: string) {
     const identifier = /^[A-Z0-9]{10}$/.test(query)
     const params: Record<string, string> = identifier
       ? { identifiers: query, identifiersType: 'ASIN' }
@@ -376,48 +395,71 @@ export class AmazonUS {
     }
   }
   async batchOffers(asins: string[]) {
-    if (!asins.length) return new Map<string,PublicQuote>()
-    if (asins.length > 20 || asins.some(id => !/^[A-Z0-9]{10}$/.test(id))) throw invalid()
-    return this.sharedOffers(asins,ids=>this.fetchBatch(ids))
+    if (!asins.length) return new Map<string, PublicQuote>()
+    if (asins.length > 20 || asins.some((id) => !/^[A-Z0-9]{10}$/.test(id))) throw invalid()
+    return this.sharedOffers(asins, (ids) => this.fetchBatch(ids))
   }
   // All callers use the US marketplace, New condition, Consumer and USD.
-  private async sharedOffers(asins:string[],fetchMissing:(ids:string[])=>Promise<Map<string,PublicQuote>>) {
-    const db=this.pacingDB
-    if(!db) return fetchMissing(asins)
-    return dispatch(db,'pricing',this.caller,async()=>{
-      const cached=await db.prepare(`SELECT asin,quote FROM public_amazon_offers WHERE asin IN
-        (SELECT value FROM json_each(?)) AND checked_at>unixepoch()-300`).bind(JSON.stringify(asins)).all<{asin:string;quote:string}>()
-      const values=new Map(cached.results.map(r=>[r.asin,JSON.parse(r.quote) as PublicQuote]))
-      const missing=[...new Set(asins)].filter(id=>!values.has(id))
-      if(missing.length){
-        const fresh=await fetchMissing(missing)
-        const writes=[]
-        for(const [asin,quote] of fresh){
-          values.set(asin,quote)
-          if(quote.price!==null) writes.push(db.prepare(`INSERT INTO public_amazon_offers VALUES(?,?,unixepoch())
-            ON CONFLICT(asin) DO UPDATE SET quote=excluded.quote,checked_at=excluded.checked_at`).bind(asin,JSON.stringify(quote)))
+  private async sharedOffers(
+    asins: string[],
+    fetchMissing: (ids: string[]) => Promise<Map<string, PublicQuote>>,
+  ) {
+    const db = this.pacingDB
+    if (!db) return fetchMissing(asins)
+    return dispatch(db, 'pricing', this.caller, async () => {
+      const cached = await db
+        .prepare(`SELECT asin,quote FROM public_amazon_offers WHERE asin IN
+        (SELECT value FROM json_each(?)) AND checked_at>unixepoch()-300`)
+        .bind(JSON.stringify(asins))
+        .all<{ asin: string; quote: string }>()
+      const values = new Map(cached.results.map((r) => [r.asin, JSON.parse(r.quote) as PublicQuote]))
+      const missing = [...new Set(asins)].filter((id) => !values.has(id))
+      if (missing.length) {
+        const fresh = await fetchMissing(missing)
+        const writes = []
+        for (const [asin, quote] of fresh) {
+          values.set(asin, quote)
+          if (quote.price !== null)
+            writes.push(
+              db
+                .prepare(`INSERT INTO public_amazon_offers VALUES(?,?,unixepoch())
+            ON CONFLICT(asin) DO UPDATE SET quote=excluded.quote,checked_at=excluded.checked_at`)
+                .bind(asin, JSON.stringify(quote)),
+            )
         }
-        if(writes.length) await db.batch(writes)
+        if (writes.length) await db.batch(writes)
       }
       return values
     })
   }
-  private async fetchBatch(asins:string[]) {
+  private async fetchBatch(asins: string[]) {
     const raw = await this.json(origin + '/batches/products/pricing/v0/itemOffers', {
       method: 'POST',
       headers: { 'x-amz-access-token': await this.authorize(), 'content-type': 'application/json' },
-      body: JSON.stringify({ requests: asins.map(id => ({
-        uri: '/products/pricing/v0/items/' + id + '/offers', method: 'GET',
-        MarketplaceId: market, ItemCondition: 'New', CustomerType: 'Consumer',
-      })) }),
+      body: JSON.stringify({
+        requests: asins.map((id) => ({
+          uri: '/products/pricing/v0/items/' + id + '/offers',
+          method: 'GET',
+          MarketplaceId: market,
+          ItemCondition: 'New',
+          CustomerType: 'Consumer',
+        })),
+      }),
     })
-    const batch = z.object({ responses: z.array(z.object({
-      status: z.object({ statusCode: z.number() }), body: z.unknown(),
-    })) }).parse(raw)
+    const batch = z
+      .object({
+        responses: z.array(
+          z.object({
+            status: z.object({ statusCode: z.number() }),
+            body: z.unknown(),
+          }),
+        ),
+      })
+      .parse(raw)
     const result = new Map<string, ReturnType<AmazonUS['parseOffer']>>()
     for (const row of batch.responses) {
       if (row.status.statusCode === 429) {
-        if (this.pacingDB) await observeLimit(this.pacingDB,'batch',new Headers(),true)
+        if (this.pacingDB) await observeLimit(this.pacingDB, 'batch', new Headers(), true)
         throw sourceError(429)
       }
       if (row.status.statusCode !== 200) continue
@@ -428,10 +470,13 @@ export class AmazonUS {
   }
   async offer(asin: string) {
     if (!/^[A-Z0-9]{10}$/.test(asin)) throw new PublicError('INVALID_INPUT', 'ASIN 格式无效。', 400)
-    const result=await this.sharedOffers([asin],async()=>new Map([[asin,await this.fetchOffer(asin)]]))
+    const result = await this.sharedOffers(
+      [asin],
+      async () => new Map([[asin, await this.fetchOffer(asin)]]),
+    )
     return result.get(asin)!
   }
-  private async fetchOffer(asin:string){
+  private async fetchOffer(asin: string) {
     const raw = await this.get('/products/pricing/v0/items/' + asin + '/offers', {
       MarketplaceId: market,
       ItemCondition: 'New',

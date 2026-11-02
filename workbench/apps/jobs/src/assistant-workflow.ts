@@ -8,13 +8,15 @@ export class AssistantWorkflow extends WorkflowEntrypoint<
 > {
   async run(event: WorkflowEvent<{ runId: string; attempt: number }>, step: WorkflowStep) {
     // 12 model + 24 tool checkpoints, plus report delivery. The D1 limits remain authoritative.
-    for (let index = 0; index < 40; index++) {
+    for (let index = 0; index < 600; index++) {
       const outcome = await step.do(
         'assistant-action-' + index,
-        { retries: { limit: 0, delay: '1 second' }, timeout: '25 minutes' },
+        // Paid sends are protected by persisted markers; retries recover failed D1/wake handoffs.
+        { retries: { limit: 2, delay: '5 seconds' }, timeout: '25 minutes' },
         () => advanceAssistantRun(this.env, event.payload.runId, event.payload.attempt),
       )
       if (!outcome.continue) return outcome
+      if (outcome.sleep) await step.sleep('assistant-wait-' + index, '10 seconds')
     }
     return { continue: false, status: 'partial' }
   }

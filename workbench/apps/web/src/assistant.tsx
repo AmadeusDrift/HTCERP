@@ -13,6 +13,7 @@ import {
 import { useEffect, useRef, useState } from 'react'
 import type { ChatTurn, HistoryPage, Transcript } from '../../../packages/assistant/model'
 import type { DailyTask } from '../../../packages/assistant/tasks'
+import { AssistantCollaboration, type CollaborationState } from './assistant-collaboration'
 import type { Session } from './models'
 import { prepareReference } from './reference-image'
 import { date, ErrorBox, Loading, PageLink, request, Status, useData } from './ui'
@@ -29,7 +30,7 @@ type AssistantContext = {
   jobId?: string
   session: Session
 }
-type Investigation = {
+type Investigation = CollaborationState & {
   id: string
   status: string
   modelSteps: number
@@ -65,10 +66,14 @@ function InvestigationCard({
   runId,
   answer,
   close,
+  canOnline,
+  isAdmin,
 }: {
   runId: string
   answer: string | null
   close: () => void
+  canOnline: boolean
+  isAdmin: boolean
 }) {
   const cache = useQueryClient()
   const key = ['assistant-investigation', runId]
@@ -139,7 +144,7 @@ function InvestigationCard({
               <small>其中未确认预留 ${(run.usage.unconfirmedAiMicros / 1000000).toFixed(6)}</small>
             )}
             {run.summary && <p>{run.summary}</p>}
-            {(answer || run.answer) && <p>{answer || run.answer}</p>}
+            {(run.answer || answer) && <p>{run.answer || answer}</p>}
             {products.map((id) => (
               <PageLink key={id} href={'/products/' + encodeURIComponent(id)} onClick={close}>
                 查看商品 {id}
@@ -178,6 +183,19 @@ function InvestigationCard({
                 </button>
               </div>
             )}
+            <AssistantCollaboration
+              runId={runId}
+              status={run.status}
+              run={run}
+              canOnline={canOnline}
+              isAdmin={isAdmin}
+              changed={async () => {
+                await Promise.all([
+                  cache.invalidateQueries({ queryKey: key }),
+                  cache.invalidateQueries({ queryKey: ['assistant-transcript'] }),
+                ])
+              }}
+            />
           </>
         )
       )}
@@ -298,6 +316,7 @@ function AssistantDialog({
   const turns = [...(transcript.data?.pages ?? [])].reverse().flatMap((p) => p.items)
   if (pending && !turns.some((v) => v.id === pending.id)) turns.push(pending)
   const latest = turns.at(-1)
+  const latestId = latest?.id
   const waiting = !!pending || (!!latest && !latest.runId && !latest.answer && !latest.issue)
   const investigating = turns.some((turn) => turn.runId && !finished.has(turn.runStatus ?? ''))
   const inactive = history.data?.pages[0]?.unavailable
@@ -327,9 +346,11 @@ function AssistantDialog({
     }
   }, [])
   useEffect(() => {
-    if (panel === 'chat' && latest && scroll.current)
-      scroll.current.scrollTop = scroll.current.scrollHeight
-  }, [latest, panel])
+    const container = scroll.current
+    const last = container?.querySelector('.oa-turn:last-child')
+    if (panel === 'chat' && latestId && container && last)
+      container.scrollTop += last.getBoundingClientRect().top - container.getBoundingClientRect().top
+  }, [latestId, panel])
   function choose(t: Thread) {
     setSelection(t)
     setPanel('chat')
@@ -354,11 +375,12 @@ function AssistantDialog({
   }
   async function send(investigation = false) {
     if (disabled || sending.current || (!question.trim() && !picture)) return
-    if (investigation && (investigating || picture || !question.trim())) return
+    if (investigation && (picture || !question.trim())) return
     sending.current = true
     const id = attempt.current || crypto.randomUUID()
     attempt.current = id
-    const threadId = active.id
+    const threadId = investigation && investigating ? crypto.randomUUID() : active.id
+    const targetTurnKey = ['assistant-transcript', session.id, threadId]
     const optimistic = {
       id,
       question: question.trim(),
@@ -368,11 +390,37 @@ function AssistantDialog({
       answer: null,
       issue: null,
     }
-    setSelection(active)
+    setSelection(threadId === active.id ? active : { id: threadId, saved: false })
     setPending(optimistic)
     setError('')
     setMenu(false)
     try {
+      const continuing =
+        !investigation && !picture
+          ? [...turns]
+              .reverse()
+              .find(
+                (t) =>
+                  t.runId &&
+                  (investigating
+                    ? !finished.has(t.runStatus ?? '')
+                    : /^\s*(?:继续|接着)(?:刚才|之前|上次|比较|调查|看看|补查)/.test(question)) &&
+                  t.runStatus !== 'cancelled',
+              )
+          : undefined
+      if (continuing?.runId) {
+        await request(
+          '/assistant/investigations/' + encodeURIComponent(continuing.runId) + '/messages',
+          { id, message: question, intent: 'continue' },
+        )
+        await Promise.all([
+          cache.invalidateQueries({ queryKey: turnKey }),
+          cache.invalidateQueries({ queryKey: ['assistant-investigation', continuing.runId] }),
+        ])
+        setQuestion('')
+        attempt.current = ''
+        return
+      }
       const turn = await request<ChatTurn>(
         base + threadId + (investigation ? '/investigations' : '/turns'),
         {
@@ -385,7 +433,7 @@ function AssistantDialog({
           jobId,
         },
       )
-      cache.setQueryData<{ pages: Transcript[]; pageParams: string[] }>(turnKey, (old) => {
+      cache.setQueryData<{ pages: Transcript[]; pageParams: string[] }>(targetTurnKey, (old) => {
         const pages = [...(old?.pages ?? [{ items: [], more: false }])]
         pages[0] = { ...pages[0], items: [...pages[0].items.filter((v) => v.id !== turn.id), turn] }
         return { pages, pageParams: old?.pageParams ?? [''] }
@@ -588,7 +636,13 @@ function AssistantDialog({
                   <div className="oa-bubble">
                     <small>运营助手</small>
                     {turn.runId ? (
-                      <InvestigationCard runId={turn.runId} answer={turn.answer} close={close} />
+                      <InvestigationCard
+                        runId={turn.runId}
+                        answer={turn.answer}
+                        close={close}
+                        canOnline={session.role !== 'viewer'}
+                        isAdmin={session.role === 'admin'}
+                      />
                     ) : (
                       <p>{turn.answer || turn.issue || '正在回复…'}</p>
                     )}
@@ -678,12 +732,13 @@ function AssistantDialog({
               <div className="oa-investigation-start">
                 <button
                   type="button"
-                  disabled={disabled || investigating || !!picture || !question.trim()}
+                  disabled={disabled || !!picture || !question.trim()}
                   onClick={() => void send(true)}
                 >
                   开始调查（已有资料）
                 </button>
                 <small>仅使用已有资料；消耗 AI 额度，不产生数据积分。</small>
+                {investigating && <small>发送消息会补充当前调查；点击“开始调查”会另开新调查。</small>}
               </div>
               <div className="oa-tools">
                 <input

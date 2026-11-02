@@ -2,6 +2,7 @@ import { Hono } from 'hono'
 import type { AppEnv } from '../../apps/api/src/bindings'
 import { AmazonUS } from '../amazon/adapter'
 import { PublicError } from '../contracts/errors'
+import { dispatch } from '../operations/service-queue'
 import { providerCredentials } from './credentials'
 import { summarizeComments, summarizeTemuReviews } from './temu-reviews'
 
@@ -48,6 +49,20 @@ reviewRoutes.post(path, async (c) => {
     throw new PublicError('CONFLICT', '这件商品正在分析，请稍后查看。', 409)
   }
   try {
+    const identity = {
+      owner: c.var.actor.email,
+      authorize: async () => {
+        const allowed = await db
+          .prepare("SELECT 1 FROM accounts WHERE id=? AND active=1 AND role='admin'")
+          .bind(c.var.actor.id)
+          .first()
+        const local =
+          c.var.actor.local &&
+          c.env.LOCAL_DEVELOPMENT === '1' &&
+          !(await db.prepare('SELECT 1 FROM accounts LIMIT 1').first())
+        if (!allowed && !local) throw new PublicError('FORBIDDEN', '当前账号不能更新评论分析。', 403)
+      },
+    }
     const prior =
       platform === 'temu'
         ? await db
@@ -62,9 +77,27 @@ reviewRoutes.post(path, async (c) => {
     const data =
       platform === 'temu'
         ? sample?.modelIssue
-          ? await summarizeComments(c.env, sample)
-          : await summarizeTemuReviews(c.env, id, prior?.updated_at ?? 0)
-        : await new AmazonUS((await providerCredentials(c.env, 'amazon')).credentials).reviewTopics(id)
+          ? await summarizeComments(c.env, sample, { ...identity, retryKnownFailure: true })
+          : await summarizeTemuReviews(c.env, id, prior?.updated_at ?? 0, identity)
+        : await dispatch(
+            db,
+            'catalog',
+            {
+              owner: identity.owner,
+              shouldContinue: async () => {
+                await identity.authorize()
+                return true
+              },
+            },
+            async () =>
+              new AmazonUS((await providerCredentials(c.env, 'amazon')).credentials, undefined, db, {
+                owner: identity.owner,
+                shouldContinue: async () => {
+                  await identity.authorize()
+                  return true
+                },
+              }).reviewTopics(id),
+          )
     const report = { platform, id, updatedAt: new Date().toISOString(), data }
     const saved = await db
       .prepare(

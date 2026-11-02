@@ -1,5 +1,6 @@
 import { type AmazonComparison, compareAmazonProduct } from '../amazon/auto-compare'
 import { haulPriceTier } from '../amazon/haul-price-tier'
+import { assertAssistantChildActive, claimAssistantCall } from '../assistant/budget'
 import type { JobInput, JobRow, OpsBindings, StepResult } from './model'
 import { Stop } from './providers'
 
@@ -90,7 +91,16 @@ export async function runAmazonComparison(
         english ? { ...product, title_en: english } : product,
         Array.isArray(variants) ? variants : [],
         undefined,
-        {owner:job.actor,runId:job.id,attempt:job.status==='running'?job.attempt:undefined},
+        {
+          owner: job.actor,
+          runId: job.id,
+          attempt: job.status === 'running' ? job.attempt : undefined,
+          shouldContinue: async () => {
+            await assertAssistantChildActive(env.DB, job.id)
+            return true
+          },
+          beforeSend: () => claimAssistantCall(env.DB, job.id),
+        },
       ),
     )
   }

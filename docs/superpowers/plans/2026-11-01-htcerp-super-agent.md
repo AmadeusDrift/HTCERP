@@ -1,6 +1,6 @@
 # HTCERP Super Agent 分阶段工程执行计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. 2026-11-01 已获授权实施阶段 1、2，验收后部署并推送；按用户选择的阶段顺序执行，不默认启动子代理。
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. 用户后续已授权继续至阶段 4，自己验收后 push 和上线。按已批准范围连续执行，独立规格与代码审查使用子代理。
 
 **Goal:** 让现有运营助手基于已接通的电商业务能力，自主完成有授权边界、费用上限和证据报告的选品调查。
 
@@ -14,7 +14,7 @@
 
 这是项目分阶段路线与工程任务合同，配合[阶段总方案](../../../workbench/docs/AI-Agent-Super-Agent分阶段实施方案.md)使用。它说明实现位置、契约、顺序和验收，不预先生成整套实现代码。每阶段开始时先核对当时源码及迁移编号，在该阶段范围内按测试失败、最小实现、回归验证的顺序落地。
 
-用户随后明确授权实施阶段 1、2，验收后直接上线并更新 GitHub。第三至第五阶段未获本轮实施授权；验收使用模拟模型，不提高线上预算、不触发供应商业务请求。
+用户先授权实施阶段 1、2，随后明确要求继续至阶段 4，验收后直接 push 和上线。第五阶段不在本轮范围。验收使用隔离模拟模型和供应商，不提高线上预算、不触发真实收费业务请求。
 
 保留快速固定指令、旧对话和旧任务可读。新能力从读取开始，按阶段开放。每阶段独立验收后再推进后续范围。
 
@@ -129,14 +129,14 @@
 
 ### Task 3：确认、在线工具和调查总额度（阶段 3）
 
-- [ ] 在 `workbench/tests/integration/assistant-budget.test.ts` 先覆盖两项并发分配争抢最后额度、父子费用冲抵、重复确认、跨日、未知费用和管理员降低日预算。
-- [ ] 新增 proposal 与任务关联，提交动作先持久化；使用稳定 requestId 调用现有 createJob，并核对当前身份及 scope_version。
-- [ ] 将整次调查上限、子任务上限、团队日上限同时纳入检查。等待中的任务也占用已承诺额度。
-- [ ] 评论模型总结通过统一预留、调用、归档、落账路径执行；保留积分与 AI 两种单位，失败不把预留当作已释放。
-- [ ] 接通已有在线发现、商品更新、研究和 Amazon 补查；每个入口验证声明的作用与实际副作用一致。
-- [ ] 为现有研究增加明确的分析 / 观察池写入选项；旧手动研究的默认行为兼容，新助手请求默认只分析。
-- [ ] 在 `workbench/tests/integration/assistant-online.test.ts` 验证拒绝 / 过期 / 旧范围 proposal 无外部请求，已确认动作只提交一次。
-- [ ] 增加子任务等待、部分失败、超时恢复及结果回收；以 D1 终态为依据，不靠模型重复查询进度。
+- [x] 在 `workbench/tests/integration/assistant-budget.test.ts` 先覆盖两项并发分配争抢最后额度、父子费用冲抵、重复确认、跨日、未知费用和管理员降低日预算。
+- [x] 新增 proposal 与任务关联，提交动作先持久化；使用稳定 requestId 调用现有 createJob，并核对当前身份及 scope_version。
+- [x] 将整次调查上限、子任务上限、团队日上限同时纳入检查。等待中的任务也占用已承诺额度。
+- [x] 评论模型总结通过统一预留、调用、归档、落账路径执行；保留积分与 AI 两种单位，失败不把预留当作已释放。
+- [x] 接通已有在线发现、商品更新、研究和 Amazon 补查；每个入口验证声明的作用与实际副作用一致。
+- [x] 为现有研究增加明确的分析 / 观察池写入选项；旧手动研究的默认行为兼容，新助手请求默认只分析。
+- [x] 在 `workbench/tests/integration/assistant-online.test.ts` 验证拒绝 / 过期 / 旧范围 proposal 无外部请求，已确认动作只提交一次。
+- [x] 增加子任务等待、部分失败、超时恢复及结果回收；以 D1 终态为依据，不靠模型重复查询进度。
 
 验证：`pnpm exec vitest run tests/integration/assistant-budget.test.ts tests/integration/assistant-online.test.ts packages/operations/tests/jobs.test.ts`、`pnpm test:workflow`。预期并发不能突破上限；uncertain 不重发；模型可读取子任务结果继续调查。
 
@@ -144,12 +144,12 @@
 
 ### Task 4：追问归属、改条件和继续调查（阶段 4）
 
-- [ ] 在 `workbench/tests/integration/assistant-followups.test.ts` 覆盖原任务补充、无关新目标、停止后消息、完成后继续和重复消息。
-- [ ] 保存尚未处理的用户输入，在步骤边界按调查归属消费；不让新消息覆盖执行中的范围。
-- [ ] 条件变更增加 scope_version，原 proposal 失效；在途请求可以完成落账，但不能授权新的超范围调用。
-- [ ] 为后续调查保存报告版本和所用证据版本；旧结论保留并标记资料时间。
-- [ ] 账号停用、降权和归属变更在下一步检查生效；后台恢复不使用过时角色快照。
-- [ ] 浏览器覆盖进度查看、补充条件、取消和返回原对话；多运营延续现有公平派发规则。
+- [x] 在 `workbench/tests/integration/assistant-followups.test.ts` 覆盖原任务补充、无关新目标、停止后消息、完成后继续和重复消息。
+- [x] 保存尚未处理的用户输入，在步骤边界按调查归属消费；不让新消息覆盖执行中的范围。
+- [x] 条件变更增加 scope_version，原 proposal 失效；在途请求可以完成落账，但不能授权新的超范围调用。
+- [x] 为后续调查保存报告版本和所用证据版本；旧结论保留并标记资料时间。
+- [x] 账号停用、降权和归属变更在下一步检查生效；后台恢复不使用过时角色快照。
+- [x] 浏览器覆盖进度查看、补充条件、取消和返回原对话；多运营延续现有公平派发规则。
 
 验证：`pnpm exec vitest run tests/integration/assistant-followups.test.ts tests/integration/assistant-runs.test.ts`、`pnpm exec playwright test tests/e2e/assistant.spec.ts`。预期输入不丢失、不重复执行、不越权、不沿用失效授权。
 
@@ -203,3 +203,11 @@ pnpm exec vitest run tests/integration/assistant.test.ts packages/operations/tes
 - [ ] 记录代码验证、模拟上游验证和真实业务验证的区别。
 
 建档时各阶段未实施；2026-11-01 后续执行已完成阶段 1、2，新增代码验收与发布结果见阶段总方案第 11 节。此前的 43 项隔离测试仅是旧基线记录。
+
+## 7. 阶段 3、4 实施与验收（2026-11-02）
+
+Task 3、4 已完成工程验收。新增 `online.ts`、`followups.ts`、`assistant-actions.ts`、`review-ai.ts`、`assistant-collaboration.tsx` 及迁移 0024/0025；扩展原预算、任务、队列、工作流、评论和助手路由。确认采用独立 nonce，动作和提交编号稳定；新目标 pending 不阻断原调查，只有 continue 消息能改变原范围。所有费用入口计入子任务未用分配，终态触发器关闭分配但保留已发请求账本。
+
+全量 182 项单元/集成测试、TypeScript、Knip、本次修改文件格式、构建、双 Worker dry-run 及真实本地 workerd 通过。浏览器 31 场景覆盖七种视口，协作组定位歧义修正后 4 项复验通过；其余 27 项通过。全部上游隔离模拟，未启用真实业务费用；全仓历史格式问题保留。独立规格及代码质量审查通过。
+
+使用、限制、恢复与正式发布结果以阶段总方案第 12 节为准。第五阶段 Task 5 保持未完成。

@@ -5,6 +5,7 @@ export type DispatchIdentity = {
   runId?: string
   attempt?: number
   shouldContinue?: () => Promise<boolean>
+  beforeSend?: () => Promise<void>
 }
 type Lane = 'geekbi' | 'ai' | 'catalog' | 'pricing'
 const now = 'unixepoch()'
