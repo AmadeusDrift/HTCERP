@@ -312,7 +312,7 @@ try {
   assert.deepEqual(strategy.connections, { geekbi: true, productData: true, openrouter: true })
   await api('/strategy', {
     baseVersion: strategy.version,
-    settings: { ...strategy.settings, focusLimit: 0, dataDailyPoints: 10, aiDailyMicros: 50000 },
+    settings: { ...strategy.settings, focusLimit: 0, dataDailyPoints: 10, aiDailyMicros: 120000 },
   })
   async function complete(job) {
     const spec = await api('/jobs', job)

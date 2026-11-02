@@ -373,3 +373,53 @@ it('manual review source and AI calls cannot consume already committed investiga
   expect(f.fetch).not.toHaveBeenCalled()
   expect(f.db.prepare('SELECT count(*) n FROM usage_reservations').get()?.n).toBe(0)
 })
+it('oversized multibyte comment requests preserve the sample without sending AI or creating a reservation', async () => {
+  const sample = {
+    goodsId: '1',
+    total: 30,
+    rows: 30,
+    withText: 30,
+    comments: Array.from({ length: 30 }, () => '破'.repeat(900)),
+  }
+  const report = await summarizeComments(f.env, sample)
+  expect(report).toMatchObject({
+    summary: null,
+    modelIssue: expect.stringMatching(/上限|超/),
+    rows: 30,
+    withText: 30,
+  })
+  expect(report.comments).toEqual(sample.comments)
+  expect(f.fetch).not.toHaveBeenCalled()
+  expect(f.db.prepare("SELECT count(*) n FROM usage_reservations WHERE unit='micros'").get()?.n).toBe(0)
+})
+it('an oversized saved review sample stops the child before AI reservation and keeps the acquired source evidence', async () => {
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () =>
+      Response.json(
+        {
+          code: 0,
+          data: {
+            total: 30,
+            list: Array.from({ length: 30 }, () => ({
+              goodsId: '1',
+              score: 1,
+              comment: '破'.repeat(900),
+            })),
+          },
+        },
+        { headers: { 'x-gb-price-points': '10' } },
+      ),
+    ),
+  )
+  const c = await child('reviews_refresh', { calls: 2, maxAiMicros: 30000 })
+  expect((await execute(c.job)).status).toBe('partial')
+  expect(f.fetch).not.toHaveBeenCalled()
+  expect(f.db.prepare("SELECT count(*) n FROM usage_reservations WHERE unit='micros'").get()?.n).toBe(0)
+  const source = f.db.prepare("SELECT result_json FROM job_steps WHERE step_key='reviews-source'").get()!
+  expect(JSON.parse(String(source.result_json)).comments).toHaveLength(30)
+  expect(f.db.prepare("SELECT actual,state FROM usage_reservations WHERE unit='points'").get()).toEqual({
+    actual: 10,
+    state: 'confirmed',
+  })
+})

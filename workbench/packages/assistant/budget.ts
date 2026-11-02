@@ -1,5 +1,6 @@
 import { businessClock } from '../operations/model'
-import { bounds } from '../operations/providers'
+
+export const assistantModelReservationMicros = 80000
 
 // Both caps are checked by the same INSERT in the existing shared usage ledger.
 export async function reserveInvestigationModel(
@@ -24,7 +25,7 @@ export async function reserveInvestigationModel(
       'assistant-run:' + runId,
       key,
       day,
-      bounds.terra,
+      assistantModelReservationMicros,
       new Date().toISOString(),
       runId,
       attempt,

@@ -14,7 +14,7 @@ beforeEach(() => {
 afterEach(() => f.db.close())
 const spec = (id: string) => ({
   maxDataPoints: 10,
-  maxAiMicros: 60000,
+  maxAiMicros: 120000,
   actions: [
     {
       operation: 'product_refresh',
@@ -165,4 +165,12 @@ it('a pending explicitly new goal never blocks the original run reservation or a
   await confirmAssistantProposal(f.env, 'alice', run.id, p.id)
   expect(f.db.prepare('SELECT status FROM assistant_proposals').get()?.status).toBe('confirmed')
   expect(f.db.prepare('SELECT scope_version FROM assistant_runs').get()?.scope_version).toBe(1)
+})
+it('an investigation cannot reserve a controller request with only 50000 micros left', async () => {
+  const run = await createAssistantRun(f.env, 'alice', f.conversationId, f.turnId, '控制器预算', {})
+  f.db.exec(
+    "UPDATE assistant_runs SET status='running',limits_json=json_set(limits_json,'$.aiMicros',50000)",
+  )
+  expect(await reserveInvestigationModel(f.env.DB, run.id, 'controller-bound', 1, 1)).toBeNull()
+  expect(f.db.prepare('SELECT count(*) n FROM usage_reservations').get()?.n).toBe(0)
 })

@@ -13,6 +13,7 @@ import {
   buildMessages,
   type ChatTurn,
   type Conversation,
+  checkedChatPayload,
   missing,
   replyFrom,
   sanitizeImage,
@@ -174,30 +175,33 @@ assistantRoutes.post('/conversations/:id/turns', async (c) => {
       if (!key) issue = noModel
       else {
         const messages: unknown[] = await buildMessages(db, id, input, context, image)
+        const payload = () =>
+          checkedChatPayload({
+            model: models.research,
+            reasoning: { effort: 'minimal' },
+            max_tokens: 1000,
+            provider: { max_price: { prompt: 1, completion: 5 } },
+            messages,
+            tools: agentTools,
+            tool_choice: 'auto',
+            parallel_tool_calls: false,
+          })
+        const firstBody = payload()
         reserved = !!(await budgetCheck(db, directKey))
         if (!reserved) issue = budgetIssue
         else {
-          const ask = () =>
+          const ask = (body: string) =>
             sendRequest(
               new Request('https://openrouter.ai/api/v1/chat/completions', {
                 method: 'POST',
                 redirect: 'manual',
                 signal: AbortSignal.timeout(60000),
                 headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  model: models.research,
-                  reasoning: { effort: 'minimal' },
-                  max_tokens: 1000,
-                  provider: { max_price: { prompt: 1, completion: 5 } },
-                  messages,
-                  tools: agentTools,
-                  tool_choice: 'auto',
-                  parallel_tool_calls: false,
-                }),
+                body,
               }),
               c.env.OPENROUTER_US,
             )
-          const result = await ask()
+          const result = await ask(firstBody)
           cost = charged(result, 'micros')
           if (result.status === 200) {
             const toolReply = z.object({
@@ -224,40 +228,44 @@ assistantRoutes.post('/conversations/:id/turns', async (c) => {
               await applyTool(fn.name, JSON.parse(fn.arguments))
               // One bounded follow-up lets the agent use real findings to propose the next step.
               const followKey = directKey + ':follow'
-              if (
-                fn.name !== 'prepare_discovery' &&
-                cost !== null &&
-                (await budgetCheck(db, followKey))
-              ) {
-                let followCost: number | null = null
+              if (fn.name !== 'prepare_discovery' && cost !== null) {
+                messages.push(
+                  { role: 'assistant', content: null, tool_calls: calls },
+                  { role: 'tool', tool_call_id: calls[0].id, content: toolOutput },
+                )
+                let followBody: string | null = null
                 try {
-                  messages.push(
-                    { role: 'assistant', content: null, tool_calls: calls },
-                    { role: 'tool', tool_call_id: calls[0].id, content: toolOutput },
-                  )
-                  const follow = await ask()
-                  followCost = charged(follow, 'micros')
-                  if (follow.status === 200) {
-                    const more = toolReply.safeParse(follow.body)
-                    const next = more.success
-                      ? more.data.choices[0]?.message.tool_calls[0].function
-                      : undefined
-                    const facts = answer
-                    if (next) {
-                      await applyTool(next.name, JSON.parse(next.arguments))
-                      answer = facts + '\n\n' + answer
-                    } else if (!next) {
-                      const interpretation = replyFrom(follow.body, key)
-                      if (interpretation) answer = facts + '\n\n' + interpretation
+                  followBody = payload()
+                } catch (error) {
+                  if (!(error instanceof PublicError && error.code === 'AI_INPUT_LIMIT')) throw error
+                }
+                if (followBody && (await budgetCheck(db, followKey))) {
+                  let followCost: number | null = null
+                  try {
+                    const follow = await ask(followBody)
+                    followCost = charged(follow, 'micros')
+                    if (follow.status === 200) {
+                      const more = toolReply.safeParse(follow.body)
+                      const next = more.success
+                        ? more.data.choices[0]?.message.tool_calls[0].function
+                        : undefined
+                      const facts = answer
+                      if (next) {
+                        await applyTool(next.name, JSON.parse(next.arguments))
+                        answer = facts + '\n\n' + answer
+                      } else if (!next) {
+                        const interpretation = replyFrom(follow.body, key)
+                        if (interpretation) answer = facts + '\n\n' + interpretation
+                      }
                     }
+                  } finally {
+                    await db
+                      .prepare(
+                        "UPDATE usage_reservations SET actual=?,state=? WHERE direct_key=? AND step_key='reply'",
+                      )
+                      .bind(followCost, followCost === null ? 'uncertain' : 'confirmed', followKey)
+                      .run()
                   }
-                } finally {
-                  await db
-                    .prepare(
-                      "UPDATE usage_reservations SET actual=?,state=? WHERE direct_key=? AND step_key='reply'",
-                    )
-                    .bind(followCost, followCost === null ? 'uncertain' : 'confirmed', followKey)
-                    .run()
                 }
               }
             } else answer = replyFrom(result.body, key)

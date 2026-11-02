@@ -22,6 +22,36 @@ it('recognizes omitted and explicit defaults as the same cached read', async () 
   expect(result.answer).toContain('相同工具参数')
   expect(f.fetch).toHaveBeenCalledTimes(2)
 })
+it('rejects a full serialized model payload above its reserved input bound before spending', async () => {
+  const first = await start(),
+    time = new Date().toISOString()
+  const result = {
+    version: 1,
+    status: 'ok',
+    data: { text: '"'.repeat(20000) },
+    evidence: [],
+    missing: [],
+    warnings: [],
+  }
+  f.db
+    .prepare(
+      "INSERT INTO assistant_steps(run_id,seq,action_key,kind,name,input_json,status,result_json,created_at,updated_at) VALUES(?,1,'existing','tool','my_jobs','{}','completed',?,?,?)",
+    )
+    .run(first.id, JSON.stringify(result), time, time)
+  await advanceAssistantRun(f.env, first.id, 1)
+  expect(f.fetch).not.toHaveBeenCalled()
+  expect(f.db.prepare('SELECT COUNT(*) n FROM usage_reservations').get()?.n).toBe(0)
+  expect((await readAssistantRun(f.env, 'alice', first.id)).summary).toContain('模型输入上限')
+})
+it('records an anomalous fee above the request reservation and refuses the returned action', async () => {
+  f.fetch.mockResolvedValueOnce(modelAction({ type: 'tool', name: 'my_jobs', args: {} }, 0.09))
+  const result = await run((await start()).id)
+  expect(result.status).toBe('partial')
+  expect(result.toolSteps).toBe(0)
+  expect(result.usage.aiMicros).toBe(90000)
+  expect(result.answer).toContain('费用超过')
+  expect(f.fetch).toHaveBeenCalledTimes(1)
+})
 async function run(id: string, n = 20) {
   for (let i = 0; i < n; i++) if (!(await advanceAssistantRun(f.env, id, 1)).continue) break
   return readAssistantRun(f.env, 'alice', id)
@@ -63,7 +93,7 @@ it('ambiguous provider cost stays reserved and a replay cannot resend the model 
   const first = await start()
   const result = await run(first.id)
   expect(result.status).toBe('partial')
-  expect(result.usage).toMatchObject({ aiMicros: 30000, unconfirmedAiMicros: 30000 })
+  expect(result.usage).toMatchObject({ aiMicros: 80000, unconfirmedAiMicros: 80000 })
   await advanceAssistantRun(f.env, first.id, 1)
   expect(f.fetch).toHaveBeenCalledTimes(1)
 })
@@ -240,14 +270,14 @@ it('two concurrent investigations cannot reserve the last daily allowance twice'
     .run(f.conversationId, turn, new Date().toISOString())
   const two = await createAssistantRun(f.env, 'alice', f.conversationId, turn, '第二次', {})
   f.db.exec(
-    "UPDATE assistant_runs SET status='running'; UPDATE strategy_versions SET settings_json=json_set(settings_json,'$.aiDailyMicros',30000)",
+    "UPDATE assistant_runs SET status='running'; UPDATE strategy_versions SET settings_json=json_set(settings_json,'$.aiDailyMicros',80000)",
   )
   const reserved = await Promise.all([
     reserveInvestigationModel(f.env.DB, one.id, 'model-1', 1),
     reserveInvestigationModel(f.env.DB, two.id, 'model-1', 1),
   ])
   expect(reserved.filter(Boolean)).toHaveLength(1)
-  expect(f.db.prepare('SELECT sum(reserved) n FROM usage_reservations').get()?.n).toBe(30000)
+  expect(f.db.prepare('SELECT sum(reserved) n FROM usage_reservations').get()?.n).toBe(80000)
 })
 it('investigation job evidence stays owner-only even while the account is an administrator', async () => {
   f.db.exec(

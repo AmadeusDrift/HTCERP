@@ -58,6 +58,24 @@ export interface Transcript {
 }
 export const missing = () => new PublicError('NOT_FOUND', '找不到这段对话。', 404)
 export const budgetIssue = '今日团队 AI 预算不足，请联系管理员调整预算，或明天再来。'
+export function checkedChatPayload(body: Record<string, unknown>): string {
+  let images = 0
+  const measured = JSON.stringify(body, function (this: Record<string, unknown>, name, value: unknown) {
+    if (name === 'url' && typeof value === 'string' && value.startsWith('data:image/jpeg;base64,')) {
+      if (this.detail !== 'low' || ++images > 1)
+        throw new PublicError('AI_INPUT_LIMIT', '普通问答仅支持一张低精度参考图。', 400)
+      return 'data:image/jpeg;base64,[low-detail-image]'
+    }
+    return value
+  })
+  if (new TextEncoder().encode(measured).length > 18000)
+    throw new PublicError(
+      'AI_INPUT_LIMIT',
+      '完整请求超过问答输入上限，请缩小筛选范围或开始独立调查。',
+      400,
+    )
+  return JSON.stringify(body)
+}
 export function sanitizeImage(image?: string) {
   if (!image) return null
   let decoded: string

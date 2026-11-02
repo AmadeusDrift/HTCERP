@@ -4,6 +4,7 @@ import { DatabaseSync, type SQLInputValue } from 'node:sqlite'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import app from '../../apps/api/src'
 import type { Bindings } from '../../apps/api/src/bindings'
+import * as assistantModel from '../../packages/assistant/model'
 import { businessClock, usage } from '../../packages/operations/model'
 
 const key = 'test-chat-secret',
@@ -337,4 +338,79 @@ it('reads two different products through repeated tool names in bounded chat', a
   const body = (await response.json()) as { answer: string }
   expect(body.answer).toContain('第一款纸架')
   expect(body.answer).toContain('第二款纸架')
+})
+
+it('bounds complete chat text and tool schemas in UTF8 while preserving one low-detail image', () => {
+  expect(typeof assistantModel.checkedChatPayload).toBe('function')
+  const image = 'data:image/jpeg;base64,' + 'A'.repeat(200000)
+  const body = {
+    messages: [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: '商品问题' },
+          { type: 'image_url', image_url: { url: image, detail: 'low' } },
+        ],
+      },
+    ],
+    tools: [],
+  }
+  expect(JSON.parse(assistantModel.checkedChatPayload(body))).toEqual(body)
+  expect(() =>
+    assistantModel.checkedChatPayload({ messages: [{ content: '中'.repeat(6000) }] }),
+  ).toThrow()
+  expect(() =>
+    assistantModel.checkedChatPayload({ messages: [], tools: [{ description: 'x'.repeat(18000) }] }),
+  ).toThrow()
+})
+
+it('rejects an oversized first chat request before reserving or sending', async () => {
+  budget(200000)
+  const filters = Object.fromEntries(
+    Array.from({ length: 30 }, (_, n) => ['filter' + n, '测试'.repeat(150)]),
+  )
+  const response = await req(path + '/turns', owner, { ...input('查看这些条件'), filters })
+  expect(await response.json()).toMatchObject({
+    answer: null,
+    issue: expect.stringContaining('输入上限'),
+  })
+  expect(relay).not.toHaveBeenCalled()
+  expect(db.prepare('SELECT count(*) n FROM usage_reservations').get()?.n).toBe(0)
+})
+
+it('keeps readable tool facts and skips an oversized followup without an unused reservation', async () => {
+  budget(200000)
+  db.prepare(
+    "INSERT INTO products(id,platform,market,external_id,title,currency,min_price,total_sold,variants_json) VALUES('temu:US:31','temu','US','31','带长规格的纸架','USD',3,100,?)",
+  ).run(
+    JSON.stringify([
+      { sku_id: 'one', specs: [{ specKey: '说明', specValue: '较长的来源规格'.repeat(4000) }] },
+    ]),
+  )
+  relay.mockResolvedValueOnce(
+    Response.json({
+      choices: [
+        {
+          message: {
+            tool_calls: [
+              {
+                id: 'read-one',
+                type: 'function',
+                function: {
+                  name: 'read_product',
+                  arguments: JSON.stringify({ productId: 'temu:US:31' }),
+                },
+              },
+            ],
+          },
+        },
+      ],
+      usage: { cost: 0.00001 },
+    }),
+  )
+  const body = await (await req(path + '/turns', owner, input('看看纸架的规格资料'))).json()
+  expect(body).toMatchObject({ answer: expect.stringContaining('带长规格的纸架'), issue: null })
+  expect(relay).toHaveBeenCalledTimes(1)
+  expect(db.prepare('SELECT count(*) n FROM usage_reservations').get()?.n).toBe(1)
+  expect(await usage(DB)).toMatchObject({ aiMicros: 10, unconfirmedAiMicros: 0 })
 })
