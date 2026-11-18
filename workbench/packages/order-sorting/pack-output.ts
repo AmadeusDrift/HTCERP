@@ -12,7 +12,7 @@ type OutputBatch = {
   labelSource?: 'AMAZON_API'
   labelGroups?: { group: string; ready: boolean }[]
   pickingGroups?: { group: string; ready: boolean }[]
-  exportScope?: 'ALL_ORDERS'
+  exportScope?: 'ALL_ORDERS' | 'MANUAL_EXCEL'
   attributeRevision?: number
 }
 type ReadLabel = (group: string) => Promise<Uint8Array>
@@ -35,7 +35,7 @@ export async function mergePackLabels(
 export async function exportPackBundle(
   batch: OutputBatch,
   template: Uint8Array,
-  source: Uint8Array,
+  source: Uint8Array | null,
   readLabel: ReadLabel,
   readPicking?: (group: string) => Promise<Uint8Array>,
   writeGroup: typeof exportGroup = exportGroup,
@@ -44,7 +44,7 @@ export async function exportPackBundle(
   if (readPicking && (!batch.pickingGroups?.length || batch.pickingGroups.some(g => !g.ready))) throw new Error('带图备货单尚未完成，请先重试取图。')
   const JSZip = (await import('jszip')).default,
     zip = new JSZip()
-  zip.file('原始订单.xlsx', source)
+  if (source) zip.file('原始订单.xlsx', source)
   for (const group of batch.plan.groups) {
     zip.file(`分拣表/${group.filename}`, await writeGroup(template, group, batch.date))
     if (readPicking) zip.file(`带图备货单/${group.filename.replace(/\.xlsx$/i, '-带图备货单.xlsx')}`, await readPicking(group.name))
@@ -66,7 +66,12 @@ export async function exportPackBundle(
         rowCount: batch.plan.totalRows,
         units: batch.plan.totalUnits,
         notes:
-          (batch.exportScope === 'ALL_ORDERS' ? '包含本次原始文件全部唯一订单项（含历史已导入项），仅合并导出，不重复入账。商品属性取生成时 ERP 清单并保留版本。' : '仅包含本次新增订单。重复项跳过，数量变化项待核对。商品属性取本批分拣清单。') + '带图备货单使用 API 商品主图，图片与备货单缓存于 ERP。标签由 Amazon API 原版与固定欧代模板合成，每件一页 80×80 mm，按实际大小打印。',
+          (batch.exportScope === 'MANUAL_EXCEL'
+            ? '包含本条手动分拣记录的全部分组，按保存时的分组与数量出件。'
+            : batch.exportScope === 'ALL_ORDERS'
+              ? '包含本次原始文件全部唯一订单项（含历史已导入项），仅合并导出，不重复入账。商品属性取生成时 ERP 清单并保留版本。'
+              : '仅包含本次新增订单。重复项跳过，数量变化项待核对。商品属性取本批分拣清单。') +
+          '带图备货单使用 API 商品主图，图片与备货单缓存于 ERP。标签由 Amazon API 原版与固定欧代模板合成，每件一页 80×80 mm，按实际大小打印。',
       },
       null,
       2,

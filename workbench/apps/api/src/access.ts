@@ -22,6 +22,8 @@ export interface AccessBindings {
 const ranks = { viewer: 0, operator: 1, admin: 2 }
 export const accessRole = (role: Role, needed: Role) => ranks[role] >= ranks[needed]
 export function requiredRole(method: string, path: string): Role {
+  if (method === 'POST' && /^\/api\/order-sorting\/runs\/[a-f\d-]{36}\/(?:files|group-picking|group-labels)\/[^/]+$/i.test(path))
+    return 'operator'
   if (method === 'POST' && /^\/api\/order-sorting\/pack\/[a-f\d-]{36}\/factory-package$/i.test(path)) return 'operator'
   if(method==='POST'&&/^\/api\/order-sorting\/(preview|picking-preview|run)$/.test(path))return 'operator'
   if(path==='/api/order-sorting/config')return 'admin'

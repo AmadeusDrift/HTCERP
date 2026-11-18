@@ -18,8 +18,9 @@ export interface DailySalesReport extends Record<keyof DailySalesGroups, Counts 
   jimei: Counts & { marker?: 'J1T'; includedInJit?: true }
   unassignedUnits: number
   window?: SalesWindow
-  previousUnits?: number
-  previousJitUnits?: number
+  seller?: string
+  previousUnits?: number | null
+  previousJitUnits?: number | null
   previousYearUnits?: number | null
 }
 
@@ -42,14 +43,16 @@ export function dailySalesWindow(date: string) {
 
 export const lastSalesDay = (now: number) => daysBefore(salesDay(new Date(now)), 1)
 export const skuIsJimei = (sku: string) => /j1t/i.test(sku)
+export const dailySalesSkuTeam = (sku: string, assignedTeam?: keyof DailySalesGroups) =>
+  assignedTeam ?? (/ja/i.test(sku) ? 'b' : undefined)
 
 export function scheduledSalesWindow(tick: number) {
   const end = new Date(tick)
-  const hour = end.getUTCHours()
-  // Beijing 23:00, 07:00, 12:00 and 16:00, all measured from Beijing 16:00.
-  const hours = new Map([[15, 7], [23, 15], [4, 20], [8, 24]]).get(hour)
-  if (end.getUTCMinutes() !== 0 || hours === undefined) return null
-  const cutoff = end.setUTCMinutes(0, 0, 0)
+  const hour = end.getUTCHours() + end.getUTCMinutes() / 60
+  // Beijing 23:00, 07:00, 11:30 and 16:00, all measured from Beijing 16:00.
+  const hours = new Map([[15, 7], [23, 15], [3.5, 19.5], [8, 24]]).get(hour)
+  if (hours === undefined) return null
+  const cutoff = end.setUTCSeconds(0, 0)
   const start = cutoff - hours * 3600000
   const day = 86400000
   return {
@@ -96,7 +99,7 @@ export function aggregateDailySales(
       if (isJit) jit.units += line.units
       const owner = line.sku ? ownerOf(line.sku) : null
       const assignedTeam = owner ? teamByAccount.get(owner) : line.sku ? fallbackTeam(line.sku) : undefined
-      const team = assignedTeam ?? (line.sku && /ja/i.test(line.sku) ? 'b' : undefined)
+      const team = line.sku ? dailySalesSkuTeam(line.sku, assignedTeam) : undefined
       const total = team && teams[team]
       if (team && total) {
         total.units += line.units
@@ -117,8 +120,9 @@ export function dailySalesText(report: DailySalesReport, window = report.window)
     return percent > 0 && percent < 0.05 ? '<0.1%' : percent.toFixed(1) + '%'
   }
   const share = (value: number) => report.haul.units ? `（${percentage(value, report.haul.units)}）` : ''
-  const comparison = (current: number, period: string, baseline?: number) => {
+  const comparison = (current: number, period: string, baseline?: number | null) => {
     if (baseline === undefined) return ''
+    if (baseline === null) return `${period}暂无数据`
     if (baseline === 0) return `${period} 0 件`
     const change = current - baseline
     return change === 0 ? `与${period}持平` :
@@ -127,7 +131,7 @@ export function dailySalesText(report: DailySalesReport, window = report.window)
   const parentheses = (value: string) => value ? `（${value}）` : ''
   const haulComparison = [
     comparison(report.haul.units, '昨天同期', report.previousUnits),
-    report.previousYearUnits === null ? '去年同期暂无数据' : comparison(report.haul.units, '去年同期', report.previousYearUnits),
+    comparison(report.haul.units, '去年同期', report.previousYearUnits),
   ].filter(Boolean).join('，')
   const format = (label: string, metric: Counts | null) =>
     `${label}｜${metric ? units(metric.units) + share(metric.units) : '待配置'}`

@@ -16,6 +16,31 @@ const rows = [
   },
 ]
 const job = { id: 'j1', nonce: 'nonce-1', mode: 'SIMULATION', rows }
+
+it('automatically splits valid large Receive CSVs into deterministic files with at most 3000 records', async () => {
+  const inspect = runInNewContext(
+    readFileSync(new URL('preflight.js', directory), 'utf8') + '\nInventoryFiles.inspect',
+    { File, TextDecoder, TextEncoder, crypto: webcrypto },
+  ) as (file: File, mode: string) => Promise<{
+    rows: number; hash: string; issueCount: number; parts?: { file: File; rows: number; hash: string }[]
+  }>
+  const header = (await receiveFile(rows)).csv.split('\r\n')[0]
+  const record = 'Default,"SKU,quoted ""name""",1,GOOD,,'
+  const original = new File([[header, ...Array(100005).fill(record), ''].join('\r\n')], 'inventory.csv')
+  const result = await inspect(original, 'receive')
+  expect(result).toMatchObject({ rows: 100005, issueCount: 0 })
+  expect(result.parts?.map((part) => part.rows)).toEqual([...Array(33).fill(3000), 1005])
+  expect(new Set(result.parts?.map((part) => part.hash)).size).toBe(34)
+  expect((await inspect(original, 'receive')).parts?.map((part) => part.hash)).toEqual(
+    result.parts?.map((part) => part.hash),
+  )
+  for (const part of result.parts!) {
+    expect(await part.file.text()).toBe([header, ...Array(part.rows).fill(record), ''].join('\r\n'))
+    const child = await inspect(part.file, 'receive')
+    expect(child).toMatchObject({ rows: part.rows, issueCount: 0 })
+    expect(child.parts).toBeUndefined()
+  }
+})
 type State = Record<string, any>
 function harness(state: State = {}, allowLocalTest = false) {
   const calls: { url: string; body?: any; auth?: string }[] = []

@@ -57,17 +57,17 @@ test('Pack 批次显示去重与冲突，标签收齐后下载完整分拣包', 
   })
   await page.route('**/api/order-sorting/assets/template', (route) => route.fulfill({ body: template }))
   await page.goto('/order-sorting?packBatch=' + id)
-  await expect(page.getByRole('heading', { name: 'Pack 自动分拣批次' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '2026-11-17 订单' })).toBeVisible()
   await expect(page.getByText('HUC-Y-JIT-2', { exact: true })).toBeVisible()
-  await expect(page.getByRole('button', { name: '下载新增订单分拣包', exact: true })).toBeDisabled()
-  await expect(page.getByRole('button', { name: '导出本次全部订单工厂包', exact: true })).toBeDisabled()
+  await expect(page.getByRole('button', { name: '生成／重试备货单和标签' })).toBeVisible()
+  await expect(page.getByRole('radio', { name: /本次全部/ })).toBeDisabled()
   batch.state = 'READY'
   batch.labels[0].received = true
   batch.labelGroups[0].ready = true
   batch.pickingGroups[0].ready = true
   await page.getByRole('button', { name: '刷新本批次', exact: true }).click()
   const download = page.waitForEvent('download')
-  await page.getByRole('button', { name: '下载新增订单分拣包', exact: true }).click()
+  await page.getByRole('button', { name: '下载新增订单工厂包 · 2 件', exact: true }).click()
   const file = await download
   const { readFile } = await import('node:fs/promises')
   const zip = await JSZip.loadAsync(await readFile((await file.path())!))

@@ -19,6 +19,12 @@ const now = Date.parse('2026-11-16T10:00:00Z')
 function fixture() {
   const sqlite = new DatabaseSync(':memory:')
   for (const file of [
+    '0008_accounts.sql',
+    '0027_weekly_feedback.sql',
+    '0028_feedback_assignments.sql',
+    '0031_group_notifications.sql',
+    '0034_weekly_feedback_owner_rules.sql',
+    '0037_daily_store_sales.sql',
     '0041_inventory_replenishment.sql',
     '0042_inventory_source.sql',
     '0043_inventory_devices.sql',
@@ -26,6 +32,7 @@ function fixture() {
     '0045_inventory_device_handoff.sql',
     '0046_inventory_automatic.sql',
     '0047_inventory_order_history.sql',
+    '0058_inventory_new_listing_pause.sql',
   ])
     sqlite.exec(readFileSync('migrations/' + file, 'utf8'))
   sqlite.exec(

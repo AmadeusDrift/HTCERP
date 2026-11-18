@@ -107,6 +107,22 @@ async function setup() {
   return { env, send, db, objects, hooks, input, apiBodies }
 }
 
+it('reports the upstream label error without exposing tokens or download URLs', async () => {
+  const f = await setup()
+  f.send.mockImplementation(async (url) => {
+    if (String(url).includes('/auth/o2/token')) return Response.json({ access_token: 'lwa-token' })
+    return Response.json(
+      { errors: [{ code: 'InvalidInput', message: 'SKU is not eligible. lwa-token https://example.test/key' }] },
+      { status: 400, headers: { 'x-amzn-requestid': 'request-1234' } },
+    )
+  })
+  const result = downloadMergedProductLabels(f.env, f.input, f.send)
+  await expect(result).rejects.toMatchObject({
+    code: 'PRODUCT_LABEL_REQUEST_FAILED',
+    message: expect.stringContaining('商品标签，HTTP 400，请求 ID request-1234，InvalidInput · SKU is not eligible. [已隐藏] [链接已隐藏]'),
+  })
+})
+
 it('fetches one original per SKU and prints exact counts on 80 mm pages with the fixed EU rep', async () => {
   const f = await setup()
   const result = await downloadMergedProductLabels(f.env, f.input, f.send)

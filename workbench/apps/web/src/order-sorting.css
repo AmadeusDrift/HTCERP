@@ -15,6 +15,9 @@
   color: var(--muted, #64748b);
   border: 1px solid var(--border, #e2e8f0);
 }
+.sorting-plugin-download {
+  margin-inline-start: auto;
+}
 .sorting-tabs button.active {
   background: #ecf5ff;
   color: #1756a9;

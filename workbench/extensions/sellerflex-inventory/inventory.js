@@ -170,7 +170,18 @@
     render();
     for (const item of additions) {
       try {
-        const {rows, errors, issueCount, hash} = await InventoryFiles.inspect(item.file, config.mode);
+        const {rows, errors, issueCount, hash, parts} = await InventoryFiles.inspect(item.file, config.mode);
+        if (parts) {
+          const position = items.indexOf(item);
+          if (position < 0) continue;
+          items.splice(position, 1, ...parts.map(part => {
+            const duplicate = items.some(other => other.hash === part.hash && other.state === "ready");
+            return {...part, sourceHash: hash, state: duplicate ? "duplicate" : "ready",
+              messages: duplicate ? ["队列里已有相同拆分文件。"] : []};
+          }));
+          notice = item.file.name + " 已拆分为 " + parts.length + " 份，每份最多 3,000 条。";
+          continue;
+        }
         item.rows = rows;
         item.hash = hash;
         item.messages = errors;
@@ -274,12 +285,16 @@
   }
 
   async function submit(config, item, warehouseId) {
-    const key = ["sf-inventory-v1", warehouseId, config.mode, item.hash].join(":");
+    const keyPrefix = ["sf-inventory-v1", warehouseId, config.mode, ""].join(":");
+    const key = keyPrefix + item.hash;
+    const originalKey = item.sourceHash ? keyPrefix + item.sourceHash : null;
+    const original = originalKey ? (await SellerFlexManualStorage.get(originalKey))[originalKey] : null;
     const stored = (await SellerFlexManualStorage.get(key))[key];
-    if (stored) {
-      item.state = "duplicate";
-      item.sentName = stored.filename;
-      item.messages = ["此仓库已有相同文件的提交记录，请按下方文件名核对 Amazon。"];
+    if (original || stored) {
+      const prior = original || stored;
+      item.state = item.sourceHash && ["unknown", "uploading"].includes(prior.state) ? "unknown" : "duplicate";
+      item.sentName = prior.filename;
+      item.messages = ["此仓库已有该原文件或文件分段的提交记录，请按下方文件名核对 Amazon。"];
       return;
     }
     const input = await prepareUpload(config, warehouseId);

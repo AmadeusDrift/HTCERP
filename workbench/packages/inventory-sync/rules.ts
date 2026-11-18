@@ -65,6 +65,7 @@ export function decide(
   known: {
     hasOrdered?: boolean
     newListing?: boolean
+    newListingTarget?: 2 | 5
   } = {},
 ): Decision {
   const row = observationSchema.parse(input)
@@ -91,10 +92,12 @@ export function decide(
       row.sellable === 0 ? 'ordered_zero_stock' : 'below_target',
       5 - row.sellable,
     )
-  if (known.newListing || (row.createdAt !== null && row.createdAt >= enabledAt - 7 * 86_400_000))
-    return row.sellable >= 2
+  if (known.newListing || (row.createdAt !== null && row.createdAt >= enabledAt - 7 * 86_400_000)) {
+    const target = known.newListingTarget ?? 2
+    return row.sellable >= target
       ? result('skip', 'target_met')
-      : result('receive', 'new_listing', 2 - row.sellable)
+      : result('receive', 'new_listing', target - row.sellable)
+  }
   if (row.hasOrdered === null || row.createdAt === null) return result('review', 'eligibility_unknown')
   return result('skip', row.sellable === 0 ? 'zero_without_eligibility' : 'without_eligibility')
 }

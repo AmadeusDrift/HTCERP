@@ -21,7 +21,7 @@ function render(state) {
     ['已归档执行记录', String(state.archivedLiveCount || 0) + ' 份'],
     ['已保留异常', String(state.archivedReceiptCount || 0) + ' 份（未确认）'],
     ['最近模拟', state.lastResult ? state.lastResult.rowCount + ' 行 · ' + new Date(state.lastResult.at).toLocaleString() : '尚无'],
-    ['执行模式', ({ SIMULATION: '模拟校验', REAL_TRIAL: '两行真实试跑', AUTO_REPLENISH: '自动补库（每批最多 10 行）' })[state.mode] || '等待任务'],
+    ['执行模式', ({ SIMULATION: '模拟校验', REAL_TRIAL: '两行真实试跑', AUTO_REPLENISH: '自动补库（每批最多 2,900 行）' })[state.mode] || '等待任务'],
     ['库存任务', state.liveTrial ? state.liveTrial.stage + ' · ' + (state.liveTrial.filename || state.liveTrial.jobId) : '尚无任务'],
   ];
   byId('details').replaceChildren(...items.flatMap(([label, text]) => {

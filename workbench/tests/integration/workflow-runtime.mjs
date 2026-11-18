@@ -595,6 +595,7 @@ try {
     ('SELLERA','ATVPDKIKX0DER','contains_suffix','.JA-',1,'test-jack','wecom-operator')`).run()
   await admin('/group-notifications/daily-sales/teams', { team: 'a', accountIds: ['test-nick'] })
   await admin('/group-notifications/daily-sales/teams', { team: 'b', accountIds: ['test-jack'] })
+  await db.prepare("INSERT INTO daily_sales_sku_teams(sku,team) VALUES ('LAFA-DX-XCAR','a') ON CONFLICT DO NOTHING").run()
   assert.equal((await json('/group-notifications/daily-sales/teams', {
     team: 'a', accountIds: ['test-nick', 'test-jack'],
   }, ownerCookie)).status, 409)
@@ -653,11 +654,23 @@ try {
     (sale_date,hours,source,source_ref,quantity,start_at,end_at,imported_at) VALUES
     ('2025-11-13',24,'workbook','unverified',999,NULL,NULL,'2026-11-13T08:00:00.000Z'),
     ('2025-11-13',24,'amazon-orders','fixture',8,'2025-11-13T08:00:00.000Z','2025-11-14T08:00:00.000Z','2026-11-13T08:00:00.000Z')`).run()
+  const cachedReport = {
+    seller: 'SELLERA', haul: { units: 10 }, jit: { units: 4 }, jimei: { includedInJit: true },
+    window: { start: '2026-11-12T08:00:00.000Z', end: '2026-11-13T08:00:00.000Z' },
+  }
+  const persistSales = db.prepare(`INSERT INTO daily_sales_runs(id,report_date,status,report_json,updated_at)
+    VALUES(?,'2026-11-12','ready',?,'2026-11-13T08:05:00.000Z')`)
+  await persistSales.bind('daily-sales-auto-2026-11-12', JSON.stringify(cachedReport)).run()
+  await persistSales.bind('daily-sales-slot-' + Date.parse('2026-11-12T15:00:00Z'), JSON.stringify(cachedReport)).run()
+  await persistSales.bind('daily-sales-slot-' + Date.parse('2025-11-13T15:00:00Z'), JSON.stringify({
+    ...cachedReport, haul: { units: 8 },
+    window: { start: '2025-11-13T08:00:00.000Z', end: '2025-11-13T15:00:00.000Z' },
+  })).run()
   assert.equal((await json('/group-notifications/services/infringement', { groupId: sales.id }, ownerCookie)).status, 409)
+  const beforeAuto = salesWindows.length
   await runSales('auto')
-  assert.deepEqual(salesWindows.slice(-2), [
+  assert.deepEqual(salesWindows.slice(beforeAuto), [
     ['2026-11-13T08:00:00.000Z', '2026-11-14T08:00:00.000Z'],
-    ['2026-11-12T08:00:00.000Z', '2026-11-13T08:00:00.000Z'],
   ])
   const cumulative = (await admin('/group-notifications/daily-sales')).preview
   assert.equal(cumulative, salesMessages[0].text.content)
@@ -671,6 +684,7 @@ try {
   }
   assert.equal((await backfill.status()).status, 'complete')
   await runScan(tick + 90 * 60000)
+  const beforeSlot = salesWindows.length
   await runSales('slot')
   assert.equal(salesMessages.length, 3)
   assert.match(cumulative, /^【美国站 Haul U2 时段销量】\n2026-11-13 16:00 至 2026-11-14 16:00（北京时间）\nHaul U2 总计｜11 件（比昨天同期增加 10\.0%，比去年同期增加 37\.5%）/)
@@ -681,13 +695,13 @@ try {
   assert.deepEqual(salesMessages[1], {
     msgtype: 'text', text: { content: salesReport.preview },
   })
-  assert.deepEqual(salesWindows.slice(-2), [
+  assert.deepEqual(salesWindows.slice(beforeSlot), [
     ['2026-11-13T08:00:00.000Z', '2026-11-13T15:00:00.000Z'],
-    ['2026-11-12T08:00:00.000Z', '2026-11-12T15:00:00.000Z'],
   ])
-  assert.match(salesMessages[2].text.content, /^【美国站 Haul U2 时段销量】\n2026-11-13 16:00 至 2026-11-13 23:00（北京时间）\nHaul U2 总计｜11 件（比昨天同期增加 10\.0%，比去年同期减少 50\.0%）/)
-  assert.deepEqual(await db.prepare("SELECT quantity FROM daily_sales_year_baselines WHERE sale_date='2025-11-13' AND hours=7").first(), { quantity: 22 })
-  assert.match(salesMessages[2].text.content, /其中 JIT｜5 件（45\.5%）（比昨天同期增加 25\.0%）/)
+  assert.match(salesMessages[2].text.content, /^【美国站 Haul U2 时段销量】\n2026-11-13 16:00 至 2026-11-13 23:00（北京时间）\nHaul U2 总计｜11 件（昨天同期暂无数据，比去年同期增加 37\.5%）/)
+  assert.equal(await db.prepare("SELECT quantity FROM daily_sales_year_baselines WHERE sale_date='2025-11-13' AND hours=7").first(), null)
+  assert.equal(calls.filter(path => path === '/sales/v1/orderMetrics').length, 0)
+  assert.match(salesMessages[2].text.content, /其中 JIT｜5 件（45\.5%）（昨天同期暂无数据）/)
   assert.doesNotMatch(salesMessages[2].text.content, /销量日报】/)
   assert.deepEqual(salesMessages[2].text.mentioned_list, ['@all'])
   const afterSlot = await admin('/group-notifications/daily-sales')

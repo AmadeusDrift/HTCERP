@@ -73,7 +73,7 @@ test('管理员导入清单模板，运营预览生成分拣并重新下载历�
   await page.getByRole('button', { name: '保存导入文件', exact: true }).click()
   await expect(page.getByRole('status')).toContainText('清单和模板已保存')
   await expect(page.getByLabel('第2行 名称', { exact: true })).toHaveValue('已维护陶瓷杯')
-  await page.getByRole('button', { name: '订单分拣', exact: true }).click()
+  await page.getByRole('button', { name: '手动导入 Excel', exact: true }).click()
   await page.getByLabel('Order List 文件').setInputFiles({
     name: 'orders.xlsx',
     mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',

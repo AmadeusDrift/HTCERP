@@ -1,7 +1,7 @@
 import { PublicError } from '../contracts/errors'
 
 // Official defaults: 2, 0.5, 0.1 requests/s. Our US batch calls still saw 429 at 12.5s.
-const intervals = { catalog: 625, offer: 2500, batch: 25000, feedback: 1250, listings: 300,
+const intervals = { catalog: 625, offer: 2500, batch: 25000, feedback: 1250, listings: 300, 'inventory-read': 625,
   'sales-read': 2500, 'listing-read': 300, 'listing-write': 500 } as const
 const clock = "CAST(unixepoch('subsec')*1000 AS INTEGER)"
 export type AmazonOperation = keyof typeof intervals
@@ -71,11 +71,12 @@ export async function observePartnerOrders(db: D1Database, response: Response) {
   const knownRate = Number.isFinite(rate) && rate > 0 ? rate : 0
   if (!knownRate && response.status !== 429) return
   const now = Date.now()
-  const wait = response.status === 429 ? amazonRetrySeconds(response.headers,60)*1000 : 0
+  const throttled = response.status === 429
+  const wait = throttled ? amazonRetrySeconds(response.headers,60)*1000 : 0
   await db.prepare(`UPDATE partner_orders_budget SET
-    tokens=MIN(12,tokens+MAX(0,?-updated_at)*rate/1000),updated_at=?,
+    tokens=CASE WHEN ? THEN 0 ELSE MIN(12,tokens+MAX(0,?-updated_at)*rate/1000) END,updated_at=?,
     rate=CASE WHEN ?>0 THEN MIN(?,2) ELSE rate END,blocked_until=MAX(blocked_until,?) WHERE singleton=1`)
-    .bind(now,now,knownRate,knownRate,now+wait).run()
+    .bind(Number(throttled),now,now,knownRate,knownRate,now+wait).run()
 }
 export async function observeLimit(db:D1Database,op:AmazonOperation,headers:Headers,throttled:boolean){
   const rate=Number(headers.get('x-amzn-ratelimit-limit'))

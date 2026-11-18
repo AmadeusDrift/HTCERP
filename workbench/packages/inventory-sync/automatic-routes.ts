@@ -27,7 +27,7 @@ export function mountInventoryAutomaticDeviceRoutes(
   router.post('/automatic/claim', async (c) => {
     const service = new InventoryAutomatic(c.env),
       device = await deviceFor(c)
-    const result = await service.claim(device, Date.now(), await c.req.json())
+    const result = await service.claim(device, Date.now(), await c.req.json(), true)
     c.executionCtx.waitUntil(service.reconcile().catch(() => {}))
     return c.json(result)
   })

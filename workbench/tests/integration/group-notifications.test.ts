@@ -415,6 +415,9 @@ it('sends official infringements without an available mention, including Jimei l
     expect(messages().find(({ content }) => content.includes('SKU：ASSIGNED-REMOVED-LATER'))).toEqual({
       content: expect.stringContaining('涉及运营：bob'),
     })
+    db.exec(`UPDATE notification_group_members SET enabled=1 WHERE account_id='bob';
+      INSERT INTO notification_infringement_team_mentions VALUES('集美','bob');
+      INSERT INTO weekly_feedback_owners VALUES('SELLERA','ATVPDKIKX0DER','HUJM.AFTER','alice','manual','bob','now');`)
     const later = '2026-11-13T08:30:00.000Z'
     await recordInfringements(env.DB, 'SELLERA', ['HUJM.LATER', 'HUJM.LEGACY', 'HUJM.AFTER'].map(listing), later)
     const legacy = db.prepare("SELECT id FROM notification_infringement_events WHERE sku='HUJM.LEGACY'").get()
@@ -429,6 +432,7 @@ it('sends official infringements without an available mention, including Jimei l
     const followups = messages().filter(({ content }) => /HUJM\.(?:NEXT-TICK|LATER|AFTER|LEGACY)/.test(content))
     expect(followups).toHaveLength(2)
     expect(followups.find(({ content }) => content.includes('HUJM.LATER'))?.content).toContain('HUJM.AFTER')
+    expect(followups.map(({ mentioned_list }) => mentioned_list)).toEqual([['wecom_bob'], ['wecom_bob']])
     expect(followups.some(({ content }) => content.includes('HUJM.LEGACY'))).toBe(false)
     await queueInfringements(bindings)
     await drainGroupNotifications(bindings, 'infringement')

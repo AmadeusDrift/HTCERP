@@ -1,6 +1,7 @@
 import { Download, FileSpreadsheet, FolderOpen, PackageCheck, RefreshCw, Upload } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import type { AttributeRow, Cell, OrderInput, SortPlan } from '../../../packages/order-sorting/rules'
+import type { ManualFactoryStatus } from '../../../packages/order-sorting/manual-factory'
 import type {
   RunPage,
   RunResult,
@@ -49,7 +50,9 @@ function download(data: Uint8Array, name: string, zip = false) {
     new Blob([data.slice().buffer as ArrayBuffer], {
       type: zip
         ? 'application/zip'
-        : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        : name.endsWith('.pdf')
+          ? 'application/pdf'
+          : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     }),
   )
   const a = document.createElement('a')
@@ -60,14 +63,29 @@ function download(data: Uint8Array, name: string, zip = false) {
   a.remove()
   setTimeout(() => URL.revokeObjectURL(url), 30000)
 }
+const runPath = (id: string) => '/order-sorting/runs/' + encodeURIComponent(id)
+type GroupFileKind = 'labels' | 'picking'
+const groupFileName = { labels: 'SKU 标签', picking: '带图备货单' } as const
+const groupFilePath = (runId: string, group: string, kind: GroupFileKind) =>
+  runPath(runId) + '/group-' + kind + '/' + encodeURIComponent(group)
+function groupFileReady(files: ManualFactoryStatus | null, name: string, kind: GroupFileKind) {
+  const groups = kind === 'picking' ? files?.pickingGroups : files?.labelGroups
+  return groups?.some((group) => group.group === name && group.ready) ?? false
+}
+async function readGroup(runId: string, group: string, kind: GroupFileKind) {
+  const response = await fetch('/api' + groupFilePath(runId, group, kind))
+  if (!response.ok) {
+    const data = (await response.json().catch(() => null)) as { message?: string } | null
+    throw Error(data?.message ?? `无法读取 ${group} 的文件，请刷新后重试。`)
+  }
+  return new Uint8Array(await response.arrayBuffer())
+}
 
 export function OrderSortingPage() {
   const { admin, edit } = useAccess(),
     state = useData<SortingState>('/order-sorting/state')
   const config = state.data?.config
-  const [tab, setTab] = useState<'sort' | 'attributes' | 'pack'>(() =>
-    new URLSearchParams(window.location.search).has('packBatch') ? 'pack' : 'sort',
-  )
+  const [tab, setTab] = useState<'sort' | 'attributes' | 'pack'>('pack')
   const [orderFile, setOrderFile] = useState<File | null>(null)
   const [preview, setPreview] = useState<{
     plan: SortPlan
@@ -76,6 +94,8 @@ export function OrderSortingPage() {
     id: string
   } | null>(null)
   const [result, setResult] = useState<RunResult | null>(null)
+  const [files, setFiles] = useState<ManualFactoryStatus | null>(null)
+  const [activeFile, setActiveFile] = useState<{ group: string; kind: GroupFileKind } | null>(null)
   const [busy, setBusy] = useState(''),
     [error, setError] = useState<Error | null>(null),
     [message, setMessage] = useState('')
@@ -124,6 +144,7 @@ export function OrderSortingPage() {
       })
       setPreview({ plan, order, revision: config.revision, id: crypto.randomUUID() })
       setResult(null)
+      setFiles(null)
     })
   }
   async function generate() {
@@ -136,10 +157,85 @@ export function OrderSortingPage() {
         order: preview.order,
       })
       setResult(saved)
+      setFiles(null)
       setPreview(null)
       await state.refetch()
-      setMessage('分拣结果已保存，可下载各组文件或全部打包。')
+      setMessage('分拣结果已保存，可在对应分组下载文件。')
+      setFiles(await request<ManualFactoryStatus>(runPath(saved.id) + '/files'))
     })
+  }
+  function updateGroupFiles(run: RunResult, name: string, update: ManualFactoryStatus) {
+    setFiles((current) => {
+      const merge = (existing: ManualFactoryStatus['labelGroups'], changes: ManualFactoryStatus['labelGroups']) =>
+        changes ? [...(existing ?? []).filter((g) => g.group !== name), ...changes] : existing
+      const next: ManualFactoryStatus = {
+        state: 'LABELS_PENDING',
+        labelGroups: merge(current?.labelGroups, update.labelGroups),
+        pickingGroups: merge(current?.pickingGroups, update.pickingGroups),
+      }
+      if (run.plan.groups.every((g) => groupFileReady(next, g.name, 'labels') && groupFileReady(next, g.name, 'picking')))
+        next.state = 'READY'
+      return next
+    })
+  }
+  async function prepareFiles(run: RunResult) {
+    const path = runPath(run.id) + '/files'
+    const before = await request<ManualFactoryStatus>(path)
+    setFiles(before)
+    const pending = run.plan.groups.filter(({ name }) =>
+      !groupFileReady(before, name, 'labels') || !groupFileReady(before, name, 'picking'),
+    )
+    const errors: string[] = []
+    for (const [index, group] of pending.entries()) {
+      setBusy(`正在生成备货单和标签（${index + 1}/${pending.length}）· ${group.name}`)
+      try {
+        const update = await request<ManualFactoryStatus>(path + '/' + encodeURIComponent(group.name), {})
+        updateGroupFiles(run, group.name, update)
+        if (update.labelError) errors.push(`${group.name} · ${update.labelError}`)
+        if (update.pickingError) errors.push(`${group.name} · ${update.pickingError}`)
+      } catch (error) {
+        errors.push(`${group.name} · ${error instanceof Error ? error.message : '生成失败，请重试。'}`)
+      }
+    }
+    const status = await request<ManualFactoryStatus>(path)
+    setFiles(status)
+    if (status.state === 'READY') setMessage('带图备货单和 SKU 标签已生成，可以分别下载或下载工厂包。')
+    else if (errors.length) throw Error(errors.join('\n'))
+  }
+  async function downloadFactory(run: RunResult, status: ManualFactoryStatus) {
+    await perform('正在整理工厂包', async () => {
+      const { exportPackBundle } = await import('../../../packages/order-sorting/pack-output')
+      const date = run.plan.date
+      const zip = await exportPackBundle(
+        {
+          ...status, id: run.id, date, plan: run.plan, labelSource: 'AMAZON_API',
+          labels: [], conflicts: [], exportScope: 'MANUAL_EXCEL', attributeRevision: run.revision,
+        },
+        await asset(run.templateKey),
+        null,
+        (group) => readGroup(run.id, group, 'labels'),
+        (group) => readGroup(run.id, group, 'picking'),
+      )
+      download(zip, date + '-手动分拣工厂包.zip', true)
+    })
+  }
+  async function downloadGroup(run: RunResult, index: number, kind: GroupFileKind) {
+    const group = run.plan.groups[index]
+    const ready = groupFileReady(files, group.name, kind)
+    setActiveFile({ group: group.name, kind })
+    await perform(`${ready ? '正在下载' : '正在生成'} ${group.name} 的${groupFileName[kind]}`, async () => {
+      if (!ready) {
+        const update = await request<ManualFactoryStatus>(groupFilePath(run.id, group.name, kind), {})
+        updateGroupFiles(run, group.name, update)
+        if (!groupFileReady(update, group.name, kind))
+          throw Error((kind === 'picking' ? update.pickingError : update.labelError) ?? `${groupFileName[kind]}暂未生成，请重试。`)
+      }
+      const name = kind === 'picking'
+        ? group.filename.replace(/\.xlsx$/i, '-带图备货单.xlsx')
+        : `${group.name}-${run.plan.date.replaceAll('-', '')}-SKU标签.pdf`
+      download(await readGroup(run.id, group.name, kind), name)
+    })
+    setActiveFile(null)
   }
   async function importFiles() {
     await perform('正在保存清单和模板', async () => {
@@ -243,7 +339,7 @@ export function OrderSortingPage() {
       <Title
         eyebrow="ORDER SORTING"
         title="订单分拣"
-        desc="上传 Seller Flex Order List，按产品属性清单分组，生成备货分拣表。"
+        desc="选择订单批次，核对备货数量后下载交厂文件。"
       >
         <button
           type="button"
@@ -257,11 +353,11 @@ export function OrderSortingPage() {
       </Title>
       <div className="sorting-tabs">
         <button type="button" className={tab === 'pack' ? 'active' : ''} onClick={() => setTab('pack')}>
-          Pack 自动分拣
+          Pack 订单
         </button>
         <button type="button" className={tab === 'sort' ? 'active' : ''} onClick={() => setTab('sort')}>
           <PackageCheck size={17} />
-          订单分拣
+          手动导入 Excel
         </button>
         <button
           type="button"
@@ -271,6 +367,10 @@ export function OrderSortingPage() {
           <FileSpreadsheet size={17} />
           属性清单与模板
         </button>
+        <a className="btn sorting-plugin-download" href="/downloads/SellerFlex-Batch-Inventory-v0.7.3.zip" download>
+          <Download aria-hidden="true" />
+          下载分拣插件 v0.7.3
+        </a>
       </div>
       <ErrorBox error={error || state.error} />
       {message && <Notice success>{message}</Notice>}
@@ -383,16 +483,32 @@ export function OrderSortingPage() {
                               <td>{g.units}</td>
                               <td>
                                 {result ? (
-                                  <button
-                                    type="button"
-                                    className="secondary"
-                                    disabled={!!busy}
-                                    aria-label={'下载 ' + g.filename}
-                                    onClick={() => void exportResult(i)}
-                                  >
-                                    <Download size={15} />
-                                    下载
-                                  </button>
+                                  <div className="actions">
+                                     <button
+                                       type="button"
+                                       className="secondary"
+                                       disabled={!!busy}
+                                       aria-label={'下载 ' + g.filename}
+                                       onClick={() => void exportResult(i)}
+                                     >
+                                       分拣表
+                                     </button>
+                                    {(['picking', 'labels'] as const).map((kind) => {
+                                      const ready = groupFileReady(files, g.name, kind)
+                                      const active = activeFile?.group === g.name && activeFile.kind === kind
+                                      return (
+                                        <button
+                                          key={kind}
+                                          type="button"
+                                          className="secondary"
+                                          disabled={!!busy || (!ready && !edit)}
+                                          onClick={() => void downloadGroup(result, i, kind)}
+                                        >
+                                          {active ? `正在处理${groupFileName[kind]}…` : `${ready ? '下载' : '生成并下载'}${groupFileName[kind]}`}
+                                        </button>
+                                      )
+                                    })}
+                                  </div>
                                 ) : g.name === '待确认' ? (
                                   '待确认分类'
                                 ) : (
@@ -432,6 +548,18 @@ export function OrderSortingPage() {
                         <button type="button" disabled={!edit || !!busy} onClick={() => void generate()}>
                           生成并保存分拣结果
                         </button>
+                      )}
+                      {result && (
+                        files?.state === 'READY' ? (
+                          <button type="button" disabled={!!busy} onClick={() => void downloadFactory(result, files)}>
+                            <Download size={16} />
+                            下载整批工厂包
+                          </button>
+                        ) : (
+                          <button type="button" disabled={!edit || !!busy} onClick={() => void perform('正在生成备货单和标签', () => prepareFiles(result))}>
+                            生成／重试整批备货单和标签
+                          </button>
+                        )
                       )}
                       {result && (
                         <button type="button" disabled={!!busy} onClick={() => void exportResult()}>
@@ -488,8 +616,10 @@ export function OrderSortingPage() {
                                   disabled={!!busy}
                                   onClick={() =>
                                     void perform('正在读取历史结果', async () => {
-                                      setResult(await request<RunResult>('/order-sorting/runs/' + r.id))
+                                      setResult(await request<RunResult>(runPath(r.id)))
                                       setPreview(null)
+                                      setFiles(null)
+                                      setFiles(await request<ManualFactoryStatus>(runPath(r.id) + '/files'))
                                     })
                                   }
                                 >

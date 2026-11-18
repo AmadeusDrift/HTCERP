@@ -66,15 +66,17 @@ export async function automaticRuntime({ api, db, admin, device, stocks }) {
     .bind(generation, started)
     .run()
   assert.equal((await admin('/automatic/plan', {})).complete, true)
-  const claimed = (await call('/claim')).job
+  assert.equal((await call('/claim')).job, null)
+  const claimed = (await call('/claim', { bulk: true })).job
   assert.equal(claimed.mode, 'AUTO_REPLENISH')
-  assert.equal(claimed.rows.length, 10)
+  assert.equal(claimed.rows.length, 12)
   stocks.set('AUTO-000-JIT', 4)
   const keys = { jobId: claimed.id, leaseId: claimed.leaseId }
+  assert.equal((await call('/prepare', keys)).pending, true)
   const prepared = (await call('/prepare', keys)).job
   assert.equal(prepared.rows[0].quantity, 1)
   assert.equal(prepared.rows.find((row) => row.sku === 'AUTO-001-JIT').quantity, 2)
-  assert.equal(prepared.rows.length, 10)
+  assert.equal(prepared.rows.length, 12)
   assert.equal((await call('/prepare', keys)).job.csv, undefined)
   await call('/dispatched', keys)
   const receipt = {
@@ -89,23 +91,26 @@ export async function automaticRuntime({ api, db, admin, device, stocks }) {
   }
   assert.equal((await call('/results', receipt)).receipt.state, 'RECORDED')
   assert.equal((await call('/results', receipt)).replay, true)
-  const next = await call('/claim', { previousJobId: keys.jobId, previousLeaseId: keys.leaseId })
+  const next = await call('/claim', { previousJobId: keys.jobId, previousLeaseId: keys.leaseId, bulk: true })
   assert.equal(next.previousJob.state, 'RECORDED')
   assert.equal(next.previousJob.eventId, receipt.eventId)
-  assert.equal(next.job.rows.length, 2)
-  assert.ok(next.job.rows.every((row) => !prepared.rows.some((old) => old.sku === row.sku)))
+  assert.equal(next.job, null)
   await admin('/automatic/settings', { enabled: false, intervalMinutes: 60 })
   const blocked = await api.fetch(base + '/api/inventory-device/automatic/prepare', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + device.token },
-    body: JSON.stringify({ jobId: next.job.id, leaseId: next.job.leaseId }),
+    body: JSON.stringify(keys),
   })
-  assert.equal(blocked.status, 409)
+  assert.equal(blocked.status, 200)
+  assert.equal((await blocked.json()).job.csv, undefined)
   for (const row of prepared.rows) stocks.set(row.sku, row.sku === 'AUTO-001-JIT' ? 2 : 5)
   // claim schedules a paced background reconciliation and its two-minute cooldown.
   // Let the mocked ten-listing read finish, then advance only this local fixture's due time.
   await delay(5000)
-  await db.prepare('UPDATE inventory_automatic_jobs SET reconcile_at=0').run()
+  await db.batch([
+    db.prepare('UPDATE inventory_automatic_jobs SET reconcile_at=0'),
+    db.prepare('UPDATE inventory_replenishment_rows SET reconcile_after=0'),
+  ])
   await admin('/automatic/reconcile', {})
   const status = await admin('/automatic/status')
   assert.equal(status.reconciliation.unknown, 0)
@@ -114,9 +119,8 @@ export async function automaticRuntime({ api, db, admin, device, stocks }) {
     passed: true,
     realAmazonWrites: 0,
     skippedCurrentGeneration: true,
-    firstBatchRows: 10,
-    nextBatchRows: 2,
-    durableUnknownAllowsUnrelatedBatch: true,
+    firstBatchRows: 12,
+    durableUnknownDoesNotReissue: true,
     latestStockQuantity: 1,
     disabledPermitBlocked: true,
     unknownReconciled: true,

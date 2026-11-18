@@ -74,7 +74,7 @@
   }
   const identity = job => ({ jobId: job.id, leaseId: job.leaseId });
   async function observe(job) {
-    const deadline = Date.now() + 240000;
+    const deadline = Date.now() + (job.bulk ? 15 * 60 * 1000 : 240000);
     let lastHeartbeat = 0;
     while (Date.now() < deadline) {
       guard();
@@ -88,7 +88,7 @@
       refresh?.click();
       await sleep(3500);
     }
-    return { status: 'UNKNOWN', errorCount: null, evidence: { rowText: '4 分钟内未取得唯一文件的最终结果；禁止重新上传。', observedAt: Date.now() } };
+    return { status: 'UNKNOWN', errorCount: null, evidence: { rowText: (job.bulk ? '15' : '4') + ' 分钟内未取得唯一文件的最终结果；禁止重新上传。', observedAt: Date.now() } };
   }
   // The worker returns this proof only to the tab that owned the issued permit.
   // Filename alone is never evidence: a user may have selected a different file.
@@ -128,8 +128,11 @@
         try {
           await openBulk();
           if (!work.needsReconciliation) {
-            readyInput();
-            const permit = await send('prepare', identity(job));
+            let permit;
+            do {
+              readyInput();
+              permit = await send('prepare', identity(job));
+            } while (permit.pending === true);
             job = permit.job;
             if (job.csv && !permit.needsReconciliation) {
               // Recheck every guard after the network round trip, then consume once.

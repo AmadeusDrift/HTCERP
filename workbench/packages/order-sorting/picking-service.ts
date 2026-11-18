@@ -1,5 +1,4 @@
 import { PublicError } from '../contracts/errors'
-import { inventoryDeviceScope, connectionDigest } from '../inventory-sync/connection'
 import { fileKey, PrivateFileCache } from '../product-images/cache'
 import {
   type ImageEnvironment,
@@ -8,7 +7,8 @@ import {
   ProductImages,
 } from '../product-images/service'
 import type { SortGroup } from './rules'
-import type { PackBatch } from './pack-types'
+import type { OrderOutputBatch } from './pack-types'
+import { orderOutputScope } from './output-scope'
 import { exportPickingSheet, pickingFilename, pickingMime } from './picking-workbook'
 
 export class PickingSheets {
@@ -64,22 +64,10 @@ export class PickingSheets {
     })
     return file.bytes
   }
-  private async scope(batch: PackBatch) {
-    const scope = await inventoryDeviceScope(this.env.DB)
-    const record = await this.env.DB.prepare('SELECT scope_key FROM pack_order_batches WHERE id=?')
-      .bind(batch.id)
-      .first<{ scope_key: string }>()
-    const expected = await connectionDigest(
-      JSON.stringify([scope.sellerAccountId, scope.marketplaceId, scope.warehouseCode]),
-    )
-    if (!record || record.scope_key !== expected)
-      throw new PublicError('FORBIDDEN', '本批次不属于当前 Amazon 店铺。', 403)
-    return scope
-  }
-  async view(batch: PackBatch): Promise<PackBatch> {
+  async view<T extends OrderOutputBatch>(batch: T): Promise<T> {
     let scope: ImageScope
     try {
-      scope = await this.scope(batch)
+      scope = await orderOutputScope(this.env.DB, batch)
     } catch {
       return {
         ...batch,
@@ -97,8 +85,8 @@ export class PickingSheets {
     }
     return { ...batch, pickingGroups }
   }
-  async prepare(batch: PackBatch): Promise<PackBatch> {
-    const scope = await this.scope(batch),
+  async prepare<T extends OrderOutputBatch>(batch: T): Promise<T> {
+    const scope = await orderOutputScope(this.env.DB, batch),
       errors: string[] = []
     for (const group of batch.plan?.groups ?? []) {
       try {
@@ -109,10 +97,15 @@ export class PickingSheets {
     }
     return { ...(await this.view(batch)), ...(errors.length ? { pickingError: errors.join('\n') } : {}) }
   }
-  async download(batch: PackBatch, name: string) {
-    const scope = await this.scope(batch),
+  async download(batch: OrderOutputBatch, name: string, cachedOnly = false) {
+    const scope = await orderOutputScope(this.env.DB, batch),
       group = batch.plan?.groups.find((g) => g.name === name)
     if (!group) throw new PublicError('NOT_FOUND', '没有找到该分组。', 404)
+    if (cachedOnly) {
+      const file = await new PrivateFileCache(this.env).read(await this.key(scope, batch.id, group, batch.date))
+      if (!file) throw new PublicError('PICKING_UNAVAILABLE', '带图备货单尚未生成，请重试生成。', 503)
+      return pickingResponse(file.bytes, pickingFilename(group))
+    }
     return pickingResponse(
       await this.generate(scope, batch.id, group, batch.date),
       pickingFilename(group),

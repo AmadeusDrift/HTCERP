@@ -38,6 +38,10 @@ export type PackBatch = {
   pickingGroups?: { group: string; ready: boolean }[]
   pickingError?: string
 }
+export type OrderOutputBatch = Pick<
+  PackBatch,
+  'id' | 'date' | 'plan' | 'newRows' | 'state' | 'labelGroups' | 'labelSource' | 'labelError' | 'pickingGroups' | 'pickingError'
+> & { origin?: 'MANUAL_EXCEL' }
 export type PackDevice = { id: string; scope_json: string }
 export type PackBatchPage = { batches: PackBatch[]; next: { time: number; id: string } | null }
 export type PackImportInput = { requestId: string; filename: string; base64: string; warehouse: 'A1C5' }

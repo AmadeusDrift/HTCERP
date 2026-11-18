@@ -50,7 +50,7 @@ export type LiveSnapshot = {
   updatedAt: Record<string, number | null>
   evidence?: unknown
 }
-export type LiveReader = (identity: SourceIdentity, skus: string[], now: number) => Promise<LiveSnapshot>
+export type LiveReader = (identity: SourceIdentity, skus: string[], now: number, bulk?: boolean) => Promise<LiveSnapshot>
 type Trial = {
   id: string
   seller: string

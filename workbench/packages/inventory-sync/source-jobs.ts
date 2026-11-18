@@ -22,7 +22,7 @@ export type SourceDependencies = {
 }
 
 /** Deterministic cron dispatch; durable RUNNING rows can recover a crash before RUNNER.create. */
-export async function launchInventoryPatrol(env: Pick<OpsBindings, 'DB' | 'RUNNER'>, now = Date.now()) {
+export async function launchInventoryPatrol(env: Pick<OpsBindings, 'DB' | 'RUNNER'>, now = Date.now(), minimumMinutes = 0) {
   const settings = await inventorySourceSettings(env.DB)
   if (!settings.enabled || settings.mode !== 'READ_ONLY' || settings.activatedAt === null) return null
   const seller = (
@@ -51,7 +51,15 @@ export async function launchInventoryPatrol(env: Pick<OpsBindings, 'DB' | 'RUNNE
   )
     .bind(seller)
     .first<{ started_at: number }>()
-  if (latest && now - latest.started_at < settings.intervalMinutes * 60000) return null
+  if (latest && now - latest.started_at < Math.max(minimumMinutes, settings.intervalMinutes) * 60000) return null
+  // Keep the current snapshot available to the plan workflow and its cron fallback until it is seeded.
+  const pending = await env.DB.prepare(`SELECT 1 FROM inventory_source_current c
+    JOIN inventory_source_runs r ON r.id=c.generation AND r.state='COMPLETE'
+    JOIN inventory_automatic_settings s ON s.singleton=1 AND s.enabled=1 AND r.started_at>s.activated_after
+    LEFT JOIN inventory_automatic_generations g ON g.generation=r.id
+    WHERE c.seller=? AND COALESCE(g.state,'SEEDING')='SEEDING'`)
+    .bind(seller).first()
+  if (pending) return null
   const current = await env.DB.prepare(
     'SELECT r.order_through FROM inventory_source_current c JOIN inventory_source_runs r ON r.id=c.generation WHERE c.seller=?',
   )
@@ -84,6 +92,17 @@ export async function launchInventoryPatrol(env: Pick<OpsBindings, 'DB' | 'RUNNE
   return id
 }
 export const scheduleInventoryPatrol = launchInventoryPatrol
+
+export async function seedInventoryAutomatic(env: OpsBindings, generation: string, step: WorkflowStep) {
+  // A completed source snapshot can also be seeded after a pause without requesting new reports.
+  for (let page = 0; page < 2000; page++) {
+    const planned = await step.do('automatic-plan-' + page, retry, () =>
+      new InventoryAutomatic(env).plan(Date.now(), 500, generation),
+    )
+    if (planned.complete) return planned
+  }
+  return { complete: false, generation }
+}
 
 export async function inventoryPatrolWorkflow(
   env: OpsBindings,
@@ -223,12 +242,7 @@ export async function inventoryPatrolWorkflow(
       await store.publish(id)
     })
     // Checkpoint every bounded candidate page. A partial seed cannot authorize execution.
-    for (let page = 0; page < 2000; page++) {
-      const planned = await step.do('automatic-plan-' + page, retry, () =>
-        new InventoryAutomatic(env).plan(Date.now(), 500),
-      )
-      if (planned.complete) break
-    }
+    await seedInventoryAutomatic(env, id, step)
     for (let batch = 0; batch < 400; batch++) {
       const removed = await step.do('automatic-prune-' + batch, retry, () =>
         new InventoryAutomatic(env).prune(),

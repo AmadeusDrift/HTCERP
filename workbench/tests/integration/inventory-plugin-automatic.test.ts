@@ -108,6 +108,24 @@ it('rejects 11-row automatic batches and mismatched CSV checksum without releasi
   await expect(h.connector.prepare(identity(h.job), owner)).rejects.toThrow()
   expect(h.state().live.stage).toBe('PREPARING')
 })
+it('resumes preflight for a 2,900-row file and only hands out one permit', async () => {
+  const h = await harness(undefined, 2900)
+  h.job.bulk = true
+  await h.connector.poll()
+  expect(h.calls.find((c) => c.path === 'automatic/claim')?.body).toEqual({ bulk: true })
+  h.replies['automatic/prepare'] = { pending: true, job: {
+    ...h.job, rows: [], csv: undefined, filename: null,
+  } }
+  expect(await h.connector.prepare(identity(h.job), owner)).toMatchObject({ pending: true })
+  h.replies['automatic/prepare'] = new Error('read chunk interrupted')
+  await expect(h.connector.prepare(identity(h.job), owner)).rejects.toThrow()
+  expect((await h.connector.poll()).needsReconciliation).toBe(false)
+  delete h.replies['automatic/prepare']
+  const permit = await h.connector.prepare(identity(h.job), owner)
+  expect(permit.job.csv).toBe(h.job.csv)
+  expect(permit.ownedFile.size).toBeGreaterThan(16_384)
+  expect((await h.connector.prepare(identity(h.job), owner)).job.csv).toBeUndefined()
+})
 it('replays lost automatic receipt verbatim on restart, releases UNKNOWN, and advances without full archives', async () => {
   const h = await harness()
   await h.connector.poll()

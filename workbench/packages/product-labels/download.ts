@@ -71,21 +71,42 @@ function collectLines(lines: Line[]) {
   return [...grouped.values()]
 }
 
-async function request(send: typeof fetch, url: string, init: RequestInit = {}) {
+async function request(
+  send: typeof fetch,
+  url: string,
+  init: RequestInit,
+  stage: '授权' | '商品标签' | '标签文件',
+) {
   let response: Response
   try {
     response = await send(url, { ...init, redirect: 'manual', signal: AbortSignal.timeout(25_000) })
   } catch {
-    throw amazonError('PRODUCT_LABEL_REQUEST_FAILED', '暂时无法连接亚马逊标签服务，请重试。', 502, true)
+    throw amazonError('PRODUCT_LABEL_REQUEST_FAILED', `亚马逊${stage}请求超时或连接失败，请重试。`, 502, true)
   }
   if (response.ok) return response
+  const requestId = response.headers.get('x-amzn-requestid') ?? response.headers.get('x-amz-request-id')
+  const diagnostic = [stage, `HTTP ${response.status}`]
+  if (requestId && /^[a-z0-9-]{1,80}$/i.test(requestId)) diagnostic.push(`请求 ID ${requestId}`)
+  if (stage === '商品标签') {
+    const details = z.object({
+      errors: z.array(z.object({ code: z.string().max(80), message: z.string().max(4096).optional() })).max(20),
+    }).safeParse(await response.json().catch(() => null))
+    const error = details.success ? details.data.errors[0] : undefined
+    if (error && /^[a-z0-9_.-]{1,80}$/i.test(error.code)) {
+      const token = new Headers(init.headers).get('x-amz-access-token')
+      const message = token ? error.message?.replaceAll(token, '[已隐藏]') : error.message
+      const excerpt = message?.replace(/https?:\/\/\S+/gi, '[链接已隐藏]').replace(/\s+/g, ' ').trim().slice(0, 240)
+      diagnostic.push(excerpt ? `${error.code} · ${excerpt}` : error.code)
+    }
+  }
+  const suffix = `（${diagnostic.join('，')}）`
   if (response.status === 429)
-    throw amazonError('PRODUCT_LABEL_THROTTLED', '亚马逊标签接口繁忙，请稍后重试。', 429, true)
+    throw amazonError('PRODUCT_LABEL_THROTTLED', '亚马逊标签接口繁忙，请稍后重试。' + suffix, 429, true)
   if (response.status === 401 || response.status === 403)
-    throw amazonError('PRODUCT_LABEL_ACCESS_DENIED', '亚马逊拒绝了标签请求，请检查店铺授权和站点。')
+    throw amazonError('PRODUCT_LABEL_ACCESS_DENIED', '亚马逊拒绝了标签请求，请检查店铺授权和站点。' + suffix)
   throw amazonError(
     'PRODUCT_LABEL_REQUEST_FAILED',
-    '亚马逊未能提供商品标签，请核对店铺、站点和 SKU。',
+    '亚马逊未能提供商品标签，请核对店铺、站点和 SKU。' + suffix,
     502,
     response.status >= 500,
   )
@@ -111,7 +132,7 @@ async function downloadPdf(send: typeof fetch, uri: string, limit: number) {
     !/(?:^|\.)s3(?:[.-][a-z0-9-]+)*\.amazonaws\.com(?:\.cn)?$/i.test(url.hostname)
   )
     throw responseInvalid()
-  const response = await request(send, uri)
+  const response = await request(send, uri, {}, '标签文件')
   if (!response.body || Number(response.headers.get('content-length')) > limit) throw pdfInvalid()
   const reader = response.body.getReader()
   const chunks: Uint8Array[] = []
@@ -166,6 +187,7 @@ async function fetchLabels(
         localeCode: input.locale,
       }),
     },
+    '商品标签',
   )
   const parsed = z
     .object({
@@ -314,15 +336,20 @@ async function accessToken(env: ProductLabelEnvironment, send: typeof fetch) {
   const { SP_CLIENT_ID, SP_CLIENT_SECRET, SP_REFRESH_TOKEN } = credentials
   if (!SP_CLIENT_ID || !SP_CLIENT_SECRET || !SP_REFRESH_TOKEN)
     throw new PublicError('PRODUCT_LABEL_NOT_CONFIGURED', '请先配置店铺的 Amazon SP-API 授权。', 409)
-  const auth = await request(send, 'https://api.amazon.com/auth/o2/token', {
-    method: 'POST',
-    body: new URLSearchParams({
-      grant_type: 'refresh_token',
-      client_id: SP_CLIENT_ID,
-      client_secret: SP_CLIENT_SECRET,
-      refresh_token: SP_REFRESH_TOKEN,
-    }),
-  })
+  const auth = await request(
+    send,
+    'https://api.amazon.com/auth/o2/token',
+    {
+      method: 'POST',
+      body: new URLSearchParams({
+        grant_type: 'refresh_token',
+        client_id: SP_CLIENT_ID,
+        client_secret: SP_CLIENT_SECRET,
+        refresh_token: SP_REFRESH_TOKEN,
+      }),
+    },
+    '授权',
+  )
   const token = z
     .object({ access_token: z.string().min(1) })
     .safeParse(await auth.json().catch(() => null))

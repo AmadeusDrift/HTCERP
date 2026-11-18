@@ -5,8 +5,7 @@ import { PublicError } from '../contracts/errors'
 import { drainGroupNotifications, enqueueDelivery } from '../group-notifications/delivery'
 import { serviceGroup } from '../group-notifications/model'
 import type { OpsBindings } from '../operations/model'
-import { marketplace } from '../weekly-feedback/model'
-import { feedbackOwnerRules, matchFeedbackOwner } from '../weekly-feedback/owner-rules'
+import { salesSkuOwners, salesTeamMembers } from './assignments'
 import {
   aggregateDailySales,
   type DailySalesGroups,
@@ -29,13 +28,26 @@ export interface DailySalesRun {
 
 type OrdersPage = Awaited<ReturnType<AmazonUS['haulSalesPage']>>
 
-export async function salesTeamMembers(db: D1Database) {
-  const { results } = await db.prepare(`SELECT t.team,t.account_id FROM daily_sales_team_members t
-    JOIN accounts a ON a.id=t.account_id WHERE a.active=1 AND a.role IN ('operator','admin')`)
-    .all<{ team: keyof DailySalesGroups; account_id: string }>()
-  const groups: DailySalesGroups = { a: [], b: [], c: [] }
-  for (const row of results) groups[row.team].push(row.account_id)
-  return groups
+const scheduledSalesRunId = (cutoff: number, includeDaily: boolean) =>
+  includeDaily ? 'daily-sales-auto-' + lastSalesDay(cutoff) : 'daily-sales-slot-' + cutoff
+
+async function readCachedSalesTotals(
+  db: D1Database, seller: string, window: { start: string; end: string }, includeDaily: boolean,
+): Promise<Pick<DailySalesReport, 'haul' | 'jit'> | null> {
+  const id = scheduledSalesRunId(Date.parse(window.end), includeDaily)
+  const row = await db.prepare("SELECT report_json FROM daily_sales_runs WHERE id=? AND status='ready'")
+    .bind(id).first<{ report_json: string | null }>()
+  if (!row?.report_json) return null
+  let snapshot: DailySalesReport | null
+  try {
+    snapshot = JSON.parse(row.report_json) as DailySalesReport | null
+  } catch {
+    return null
+  }
+  if (snapshot?.seller !== seller || snapshot.window?.start !== window.start || snapshot.window.end !== window.end ||
+      snapshot.jimei?.includedInJit !== true || !Number.isSafeInteger(snapshot.haul?.units) ||
+      !Number.isSafeInteger(snapshot.jit?.units) || snapshot.jit.units < 0 || snapshot.haul.units < snapshot.jit.units) return null
+  return { haul: snapshot.haul, jit: snapshot.jit }
 }
 
 export async function scheduleDailySales(env: OpsBindings, tick: number) {
@@ -43,33 +55,13 @@ export async function scheduleDailySales(env: OpsBindings, tick: number) {
   if (!slot) return
   if (!(await serviceGroup(env.DB, 'daily-sales'))?.enabled) return
   const cutoff = Date.parse(slot.end)
-  const id = slot.includeDaily ? 'daily-sales-auto-' + lastSalesDay(cutoff) : 'daily-sales-slot-' + cutoff
+  const id = scheduledSalesRunId(cutoff, slot.includeDaily)
   try {
     await env.RUNNER.create({ id, params: { runId: id, salesTick: cutoff } })
   } catch (error) {
     // A repeated cron event can already have claimed the same report date.
     const existing = await env.RUNNER.get(id).then((instance) => instance.status()).catch(() => null)
     if (!existing) throw error
-  }
-}
-
-async function orderOwners(db: D1Database, seller: string, orders: HaulSaleOrder[]) {
-  const skus = [...new Set(orders.flatMap((order) => order.items.flatMap((line) => line.sku ? [line.sku] : [])))]
-  const rules = await feedbackOwnerRules(db, seller)
-  const assignments = new Map<string, { id: string; source: string }>()
-  for (let offset = 0; offset < skus.length; offset += 80) {
-    const batch = skus.slice(offset, offset + 80)
-    const { results } = await db.prepare(`SELECT o.sku,a.id,o.source FROM weekly_feedback_owners o JOIN accounts a ON a.id=o.account_id
-      WHERE o.seller=? AND o.marketplace=? AND a.active=1 AND a.role IN ('operator','admin')
-      AND o.sku IN (${batch.map(() => '?').join(',')})`)
-      .bind(seller, marketplace, ...batch).all<{ sku: string; id: string; source: string }>()
-    for (const row of results) assignments.set(row.sku, row)
-  }
-  return (sku: string) => {
-    const saved = assignments.get(sku)
-    return saved?.source === 'manual'
-      ? saved.id
-      : matchFeedbackOwner(sku, rules)?.account_id ?? saved?.id ?? null
   }
 }
 
@@ -83,20 +75,37 @@ export async function dailySalesWorkflow(
   const reportDate = slot ? start.slice(0, 10) : date
   let amazon: AmazonUS | undefined
   let report: DailySalesReport
+  const amazonClient = async () => {
+    amazon ??= new AmazonUS((await providerCredentials(env, 'amazon')).credentials, undefined, db)
+    return amazon
+  }
   const readOrders = async (from: string, through: string, stepPrefix: string) => {
     const orders: OrdersPage['orders'] = []
     const tokens = new Set<string>()
     let cursor: string | null = null
     for (let number = 1; ; number++) {
       const token: string | null = cursor
-      const page: OrdersPage = await step.do(
-        stepPrefix + number,
-        { retries: { limit: 4, delay: '3 minutes', backoff: 'exponential' } },
-        async (): Promise<OrdersPage> => {
-          amazon ??= new AmazonUS((await providerCredentials(env, 'amazon')).credentials)
-          return amazon.haulSalesPage(from, through, token ?? undefined)
-        },
-      )
+      const pageName = stepPrefix + number
+      let page: OrdersPage
+      for (let attempt = 0; ; attempt++) {
+        const result: OrdersPage | { waitSeconds: number } = await step.do(
+          attempt === 0 ? pageName : `${pageName}-quota-retry-${attempt}`,
+          { retries: { limit: 4, delay: '3 minutes', backoff: 'exponential' } },
+          async () => {
+            try {
+              return await (await amazonClient()).haulSalesPage(from, through, token ?? undefined)
+            } catch (error) {
+              if (!(error instanceof PublicError) || error.code !== 'SOURCE_THROTTLED') throw error
+              return { waitSeconds: Math.max(1, Math.ceil(error.retryAfterSeconds ?? 60)) + 1 }
+            }
+          },
+        )
+        if (!('waitSeconds' in result)) {
+          page = result
+          break
+        }
+        await step.sleep(`${pageName}-quota-wait-${attempt}`, `${result.waitSeconds} seconds`)
+      }
       orders.push(...page.orders)
       cursor = page.nextToken
       if (!cursor) break
@@ -121,11 +130,8 @@ export async function dailySalesWorkflow(
       if (availableAt > Date.now()) await step.sleepUntil('orders-cutoff-available', availableAt)
     }
     const orders = await readOrders(start, end, slot ? 'read-cumulative-orders-' : 'read-orders-page-')
-    let previousTotals: Pick<DailySalesReport, 'haul' | 'jit'> | undefined
-    if (slot) {
-      const previous = await readOrders(slot.previous.start, slot.previous.end, 'read-yesterday-orders-')
-      previousTotals = aggregateDailySales(reportDate, previous, () => null, { a: [], b: [], c: [] })
-    }
+    const previousTotals = slot ? await step.do('read-yesterday-sales-cache', () =>
+      readCachedSalesTotals(db, seller, slot.previous, slot.includeDaily)) : null
     const previousYearUnits = slot ? await step.do('read-prior-year-sales', { retries: { limit: 2, delay: '15 seconds' } }, async () => {
       const currentStart = new Date(start)
       const priorStart = new Date(start)
@@ -138,28 +144,22 @@ export async function dailySalesWorkflow(
       const baseline = await db.prepare(`SELECT quantity FROM daily_sales_year_baselines
         WHERE start_at=? AND end_at=? ORDER BY source LIMIT 1`).bind(from, through).first<{ quantity: number }>()
       if (baseline) return baseline.quantity
-
-      amazon ??= new AmazonUS((await providerCredentials(env, 'amazon')).credentials)
-      const metrics = await amazon.partnerSales(from, through)
-      const [metricStart, metricEnd] = metrics.interval.split('--').map(Date.parse)
-      if (metricStart !== priorStart.getTime() || metricEnd !== Date.parse(through)) return null
-      await db.prepare(`INSERT INTO daily_sales_year_baselines
-        (sale_date,hours,source,source_ref,quantity,start_at,end_at,imported_at)
-        VALUES (?,?,'amazon-sales-sp-api',?,?,?,?,?) ON CONFLICT(sale_date,hours,source) DO NOTHING`)
-        .bind(from.slice(0, 10), duration / 3600000, metrics.interval, metrics.unitCount, from, through, new Date().toISOString()).run()
-      return metrics.unitCount
+      const cached = await readCachedSalesTotals(db, seller, { start: from, end: through }, slot.includeDaily)
+      return cached?.haul.units ?? null
     }).catch(() => null) : null
     report = await step.do(slot ? 'save-cumulative-sales' : 'save-daily-sales', async () => {
-      const ownerOf = await orderOwners(db, seller, orders)
+      const skus = [...new Set(orders.flatMap((order) => order.items.flatMap((line) => line.sku ? [line.sku] : [])))]
+      const ownerOf = await salesSkuOwners(db, seller, skus)
       const { results } = await db.prepare('SELECT sku,team FROM daily_sales_sku_teams')
         .all<{ sku: string; team: keyof DailySalesGroups }>()
       const confirmed = new Map(results.map(({ sku, team }) => [sku, team]))
       const groups = await salesTeamMembers(db)
       const value = aggregateDailySales(reportDate, orders, ownerOf, groups, (sku) => confirmed.get(sku))
-      if (previousTotals) {
+      if (slot) {
         value.window = { start, end }
-        value.previousUnits = previousTotals.haul.units
-        value.previousJitUnits = previousTotals.jit.units
+        value.seller = seller
+        value.previousUnits = previousTotals?.haul.units ?? null
+        value.previousJitUnits = previousTotals?.jit.units ?? null
         value.previousYearUnits = previousYearUnits
       }
       await db.prepare(`UPDATE daily_sales_runs SET status='ready',report_json=?,error=NULL,updated_at=? WHERE id=?`)

@@ -121,6 +121,14 @@ async function outbound(request) {
         : [],
     })
   }
+  if (url.pathname === '/listings/2021-08-01/items/SELLER1' && url.searchParams.has('identifiers')) {
+    const skus = url.searchParams.get('identifiers').split(',')
+    assert.equal(url.searchParams.get('identifiersType'), 'SKU')
+    assert.ok(skus.length <= 20)
+    const items = await Promise.all(skus.map(async (sku) =>
+      (await outbound(new Request('https://' + url.hostname + url.pathname + '/' + encodeURIComponent(sku) + '?' + url.searchParams))).json()))
+    return Response.json({ items })
+  }
   if (url.pathname === '/listings/2021-08-01/items/SELLER1/FIXTURE-JIT') {
     assert.equal(url.searchParams.get('includedData'), 'summaries,issues,attributes')
     assert.equal(url.searchParams.get('marketplaceIds'), 'ATVPDKIKX0DER')

@@ -121,8 +121,9 @@ export class AmazonUS {
     private readonly pacingDB?: D1Database,
     private readonly caller: DispatchIdentity = { owner: 'interactive' },
   ) {}
-  private async json(url: URL | string, init: RequestInit = {}, partnerOrders = false): Promise<unknown> {
+  private async json(url: URL | string, init: RequestInit = {}, imageStage?: string): Promise<unknown> {
     const partner = this.caller.owner.startsWith('partner:')
+    const ordersRead = new URL(url).pathname === '/orders/2026-01-01/orders'
     const operation = pacedOperation(url, partner)
     if (operation && this.pacingDB) await acquireSlot(this.pacingDB, operation, partner ? 2000 : undefined)
     if (operation && this.pacingDB && this.caller.attempt !== undefined) {
@@ -135,7 +136,7 @@ export class AmazonUS {
     let response: Response
     if (this.caller.shouldContinue && !(await this.caller.shouldContinue()))
       throw new PublicError('CONFLICT', '任务授权已变化，未发送请求。', 409)
-    if (partnerOrders && this.pacingDB)
+    if (ordersRead && this.pacingDB)
       await acquirePartnerOrders(this.pacingDB, this.caller.owner.startsWith('performance:'))
     await this.caller.beforeSend?.()
     try {
@@ -149,10 +150,18 @@ export class AmazonUS {
     }
     if (operation && this.pacingDB)
       await observeLimit(this.pacingDB, operation, response.headers, response.status === 429)
-    if (partnerOrders && this.pacingDB) await observePartnerOrders(this.pacingDB, response)
-    if (partner && response.status === 429)
+    if (ordersRead && this.pacingDB) await observePartnerOrders(this.pacingDB, response)
+    if ((partner || ordersRead) && response.status === 429)
       throw new PublicError('SOURCE_THROTTLED','Amazon 配额暂时忙，请稍后重试。',429,'amazon',true,amazonRetrySeconds(response.headers,60))
-    if (!response.ok) throw sourceError(response.status)
+    if (!response.ok) {
+      const error = sourceError(response.status)
+      if (imageStage) {
+        const requestId = response.headers.get('x-amzn-requestid')
+        const trace = requestId && /^[a-z0-9-]{1,80}$/i.test(requestId) ? `，请求 ID ${requestId}` : ''
+        error.message += `（${imageStage}，HTTP ${response.status}${trace}）`
+      }
+      throw error
+    }
     return response.json().catch(() => {
       throw invalid()
     })
@@ -176,7 +185,7 @@ export class AmazonUS {
     this.token = parsed.data.access_token
     return this.token
   }
-  private async get(path: string, params: Record<string, string>, partnerOrders = false) {
+  private async get(path: string, params: Record<string, string>, imageStage?: string) {
     const url = new URL(path, origin)
     url.search = new URLSearchParams(params).toString()
     const body = await this.json(url, {
@@ -185,7 +194,7 @@ export class AmazonUS {
         'user-agent': 'SelectionWorkbench/0.1 (Language=TypeScript)',
         accept: 'application/json',
       },
-    }, partnerOrders)
+    }, imageStage)
     return redactJson(body, [
       this.secrets.SP_CLIENT_ID,
       this.secrets.SP_CLIENT_SECRET,
@@ -253,7 +262,7 @@ export class AmazonUS {
       maxResultsPerPage: '40',
       includedData: 'PROCEEDS,FULFILLMENT,CANCELLATION',
       ...(token ? { paginationToken: token } : {}),
-    }, true)
+    })
   }
 
   async performanceOrders(from: string, through: string, basis: 'created' | 'updated', token?: string) {
@@ -264,7 +273,7 @@ export class AmazonUS {
       maxResultsPerPage: '100',
       includedData: 'PROCEEDS,FULFILLMENT,CANCELLATION',
       ...(token ? { paginationToken: token } : {}),
-    }, true)
+    })
   }
 
   async partnerListings(seller: string, since: string, until: string, token?: string) {
@@ -660,13 +669,13 @@ export class AmazonUS {
       mainImage: z.object({ link: z.string() }).optional(),
     })) }).parse(await this.get('/listings/2021-08-01/items/' + encodeURIComponent(seller) + '/' + encodeURIComponent(sku), {
       marketplaceIds: market, includedData: 'summaries',
-    }))
+    }, 'SKU 刊登'))
     if (listing.sku !== sku) throw invalid()
     const summary = listing.summaries.find(s => s.marketplaceId === market)
     if (!summary) throw invalid()
     const item = catalogImageItem.parse(await this.get('/catalog/2022-04-01/items/' + encodeURIComponent(summary.asin), {
       marketplaceIds: market, includedData: 'images',
-    }))
+    }, '商品目录图片'))
     if (item.asin !== summary.asin) throw invalid()
     const url = item.images?.find(g => g.marketplaceId === market)?.images
       .filter(i => i.variant === 'MAIN').sort((a, b) => (b.height ?? 0) - (a.height ?? 0))[0]?.link ?? summary.mainImage?.link

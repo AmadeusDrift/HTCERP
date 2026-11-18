@@ -21,7 +21,7 @@ it('allows only Pack top-frame documents to invoke narrow broker methods and doe
 })
 it('ships Pack MAIN observer and isolated UI without extra permissions', () => {
   const manifest = JSON.parse(readFileSync(new URL('manifest.json', directory), 'utf8'))
-  expect(manifest.version).toBe('0.7.1')
+  expect(manifest.version).toBe('0.7.3')
   expect(manifest.permissions).toEqual(['storage', 'alarms'])
   expect(manifest.host_permissions).toEqual(['https://htcerp.app/*'])
   expect(manifest.content_scripts.find((item: any) => item.world === 'MAIN')).toMatchObject({ matches: ['https://sellerflex.amazon.com/*'], js: ['pack-export-main.js'], run_at: 'document_start', all_frames: false })

@@ -12,9 +12,9 @@
     const automatic = live => live?.job.mode === 'AUTO_REPLENISH';
     const protocol = live => automatic(live) ? 'automatic' : 'live';
     const publicJob = live => ({ job: live ? { ...live.job } : null, needsReconciliation: Boolean(live && live.stage !== 'CLAIMED') });
-    const metadata = job => ({ id: job.id, leaseId: job.leaseId, mode: job.mode, state: job.state, rows: job.rows, filename: job.filename, sha256: job.sha256, warehouseCode: job.warehouseCode, expiresAt: job.expiresAt });
+    const metadata = job => ({ id: job.id, leaseId: job.leaseId, mode: job.mode, state: job.state, ...(job.bulk === true ? { bulk: true } : { rows: job.rows }), filename: job.filename, sha256: job.sha256, warehouseCode: job.warehouseCode, expiresAt: job.expiresAt });
     function validate(job, state) {
-      if (!job || !['REAL_TRIAL', 'AUTO_REPLENISH'].includes(job.mode) || !text(job.id) || !text(job.leaseId) || job.warehouseCode !== 'A1C5' || state.scope?.warehouseCode !== job.warehouseCode || !Array.isArray(job.rows) || job.rows.length < 1 || job.rows.length > (job.mode === 'AUTO_REPLENISH' ? 10 : 2)) invalid();
+      if (!job || !['REAL_TRIAL', 'AUTO_REPLENISH'].includes(job.mode) || !text(job.id) || !text(job.leaseId) || job.warehouseCode !== 'A1C5' || state.scope?.warehouseCode !== job.warehouseCode || !Array.isArray(job.rows) || job.rows.length < 1 || job.rows.length > (job.mode === 'AUTO_REPLENISH' ? (job.bulk === true ? 2900 : 10) : 2)) invalid();
     }
     const recorded = (live, proof) => Boolean(automatic(live) && proof?.state === 'RECORDED'
       && proof.submitted === true && proof.id === live.job.id && proof.leaseId === live.job.leaseId
@@ -54,7 +54,8 @@
         }
         const previous = state.live && protocol(state.live) === mode ? state.live : null;
         const result = await request(state, mode + '/claim', previous
-          ? { previousJobId: previous.job.id, previousLeaseId: previous.job.leaseId } : {});
+          ? { previousJobId: previous.job.id, previousLeaseId: previous.job.leaseId, ...(mode === 'automatic' ? { bulk: true } : {}) }
+          : mode === 'automatic' ? { bulk: true } : {});
         if (!result || !Object.hasOwn(result, 'job')) invalid();
         if (result.job) {
           validate(result.job, state);
@@ -97,6 +98,8 @@
         }
         if (state.live?.job.id === result.job.id) {
           if (state.live.job.leaseId !== result.job.leaseId) invalid();
+          if (result.job.bulk === true && result.job.state === 'CLAIMED' && state.live.stage === 'PREPARING')
+            state.live.stage = 'CLAIMED';
           // Server may renew lease metadata, but can never reset the local dispatch latch.
           state.live.job = { ...state.live.job, ...metadata(result.job) };
         } else {
@@ -136,6 +139,16 @@
         state.live.stage = 'PREPARING';
         await save(state);
         const response = await request(state, protocol(state.live) + '/prepare', input);
+        if (response.pending === true) {
+          const job = response.job;
+          identity({ job }, input);
+          if (state.live.job.bulk !== true || job.bulk !== true || job.mode !== 'AUTO_REPLENISH'
+            || job.state !== 'CLAIMED' || job.csv || job.filename || job.needsReconciliation) invalid();
+          state.live.job = metadata(job);
+          state.live.stage = 'CLAIMED';
+          await save(state);
+          return { ...publicJob(state.live), pending: true };
+        }
         if (response.job?.state === 'SKIPPED' && !response.job.csv) {
           identity({ job: response.job }, input);
           if (response.job.mode !== state.live.job.mode || response.job.warehouseCode !== 'A1C5') invalid();
@@ -159,12 +172,14 @@
         validate(job, state);
         if (job.mode !== state.live.job.mode) invalid();
         identity({ job }, input);
-        if (!/^receive-[A-Za-z0-9-]+\.csv$/.test(job.filename) || !/^[a-f0-9]{64}$/.test(job.sha256) || !(expires(job.expiresAt) > Date.now()) || typeof job.csv !== 'string' || job.csv.length > 16384) invalid();
+        if (job.bulk !== state.live.job.bulk || !/^receive-[A-Za-z0-9-]+\.csv$/.test(job.filename) || !/^[a-f0-9]{64}$/.test(job.sha256) || !(expires(job.expiresAt) > Date.now()) || typeof job.csv !== 'string' || job.csv.length > (job.bulk === true ? 6500000 : 16384)) invalid();
         const canonical = await manifest({ ...job, mode: 'SIMULATION', nonce: job.leaseId });
-        const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(job.csv));
+        const bytes = new TextEncoder().encode(job.csv);
+        if (bytes.length > (job.bulk === true ? 6500000 : 16384)) invalid();
+        const digest = await crypto.subtle.digest('SHA-256', bytes);
         const hash = Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('');
         if (canonical.sha256 !== job.sha256 || hash !== job.sha256) invalid();
-        const ownedFile = { owner, filename: job.filename, sha256: job.sha256, size: new TextEncoder().encode(job.csv).length, lastModified: Date.now() };
+        const ownedFile = { owner, filename: job.filename, sha256: job.sha256, size: bytes.length, lastModified: Date.now() };
         state.live = { ...state.live, job: metadata(job), owner, ownedFile, stage: 'DISPATCHING' };
         await save(state);
         return { job: { ...state.live.job, csv: job.csv }, ownedFile, needsReconciliation: false };

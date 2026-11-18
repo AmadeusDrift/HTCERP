@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Seller Flex 批量库存助手",
-  "version": "0.7.1",
+  "version": "0.7.3",
   "minimum_chrome_version": "114",
   "description": "Pack 一键展开全部订单、全选导出至 ERP 自动分拣，生成 API 标签和带图备货单；保留库存流程。",
   "permissions": [

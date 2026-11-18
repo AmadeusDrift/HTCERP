@@ -1,10 +1,11 @@
 import { z } from 'zod'
 import { PublicError } from '../contracts/errors'
-import { amazonAutomaticReader } from './automatic-reader'
+import { amazonAutomaticReader, automaticReadGroupSize } from './automatic-reader'
 import { InventoryExecutor } from './executor'
 import { type LiveDevice, type LiveEnvironment, type LiveReader, liveOutcomes, receipt } from './live'
-import { ReplenishmentQueue } from './queue'
-import { receiveFile } from './receive-file'
+import { fiveUnitNewListings } from './new-listing-targets'
+import { automaticDemandPolicy, bulkPreflightFreshMs, ReplenishmentQueue } from './queue'
+import { automaticFileMaxRows, receiveFile } from './receive-file'
 import { type InventoryObservation, inventoryKey, observationSchema, scopeKey, skuKey } from './rules'
 import { type SourceIdentity, sourceConnection, sourceMarket } from './source'
 
@@ -53,9 +54,10 @@ export class InventoryAutomatic {
   }
   async status() {
     const settings = await this.env.DB.prepare(
-      'SELECT enabled,(SELECT interval_minutes FROM inventory_source_settings WHERE singleton=1) AS intervalMinutes,updated_at AS updatedAt,activated_after AS activatedAfter FROM inventory_automatic_settings WHERE singleton=1',
+      'SELECT enabled,new_listings_enabled AS newListingsEnabled,(SELECT interval_minutes FROM inventory_source_settings WHERE singleton=1) AS intervalMinutes,updated_at AS updatedAt,activated_after AS activatedAfter FROM inventory_automatic_settings WHERE singleton=1',
     ).first<{
       enabled: number
+      newListingsEnabled: number
       intervalMinutes: number
       updatedAt: number
       activatedAfter: number | null
@@ -72,7 +74,7 @@ export class InventoryAutomatic {
       .bind(seller)
       .first()
     const counts = await this.env.DB.prepare(
-      `SELECT COUNT(*) AS candidates,COALESCE(SUM(d.paused=1),0) AS paused,COALESCE(SUM(d.retry_at>?),0) AS coolingDown,COALESCE(SUM(d.paused=0 AND d.retry_at<=? AND d.action IN('receive','review') AND NOT EXISTS(SELECT 1 FROM inventory_replenishment_rows r WHERE r.inventory_key=d.inventory_key AND r.active=1)),0) AS pending FROM inventory_automatic_candidates a JOIN inventory_source_current c ON c.generation=a.generation AND c.seller=? JOIN inventory_replenishment_demands d ON d.inventory_key=a.inventory_key JOIN inventory_source_runs run ON run.id=a.generation JOIN inventory_automatic_settings s ON s.singleton=1 WHERE run.started_at>s.activated_after`,
+      `SELECT COUNT(*) AS candidates,COALESCE(SUM(d.paused=1),0) AS paused,COALESCE(SUM(d.retry_at>?),0) AS coolingDown,COALESCE(SUM(d.paused=0 AND d.retry_at<=? AND d.action IN('receive','review') AND NOT EXISTS(SELECT 1 FROM inventory_replenishment_rows r WHERE r.inventory_key=d.inventory_key AND r.active=1)),0) AS pending FROM inventory_automatic_candidates a JOIN inventory_source_current c ON c.generation=a.generation AND c.seller=? JOIN inventory_replenishment_demands d ON d.inventory_key=a.inventory_key JOIN inventory_source_runs run ON run.id=a.generation JOIN inventory_automatic_settings s ON s.singleton=1 WHERE run.started_at>s.activated_after AND ${automaticDemandPolicy}`,
     )
       .bind(Date.now(), Date.now(), seller)
       .first()
@@ -94,8 +96,9 @@ export class InventoryAutomatic {
     return {
       mode: 'AUTO_REPLENISH',
       history,
-      maxRows: 10,
+      maxRows: automaticFileMaxRows,
       enabled: settings?.enabled === 1,
+      newListingsEnabled: settings?.newListingsEnabled === 1,
       intervalMinutes: settings?.intervalMinutes ?? 60,
       updatedAt: settings?.updatedAt ?? 0,
       activatedAfter: settings?.activatedAfter ?? null,
@@ -114,14 +117,16 @@ export class InventoryAutomatic {
         enabled: z.boolean(),
         intervalMinutes: z.number().int().min(5).max(10080),
         startFrom: z.literal('NEXT_PATROL').default('NEXT_PATROL'),
+        newListingsEnabled: z.boolean().optional(),
       })
       .strict()
       .parse(input)
     if (data.enabled) await sourceConnection(this.env)
     await this.env.DB.batch([
       this.env.DB.prepare(
-        'UPDATE inventory_automatic_settings SET activated_after=CASE WHEN enabled=0 AND ?=1 THEN ? ELSE activated_after END,enabled=?,interval_minutes=?,updated_at=? WHERE singleton=1',
-      ).bind(data.enabled ? 1 : 0, now, data.enabled ? 1 : 0, data.intervalMinutes, now),
+        'UPDATE inventory_automatic_settings SET activated_after=CASE WHEN enabled=0 AND ?=1 THEN ? ELSE activated_after END,enabled=?,interval_minutes=?,updated_at=?,new_listings_enabled=COALESCE(?,new_listings_enabled) WHERE singleton=1',
+      ).bind(data.enabled ? 1 : 0, now, data.enabled ? 1 : 0, data.intervalMinutes, now,
+        data.newListingsEnabled === undefined ? null : Number(data.newListingsEnabled)),
       this.env.DB.prepare(
         'UPDATE inventory_source_settings SET enabled=CASE WHEN ?=1 THEN 1 ELSE enabled END,interval_minutes=?,activated_at=COALESCE(activated_at,?),updated_at=? WHERE singleton=1',
       ).bind(data.enabled ? 1 : 0, data.intervalMinutes, now, now),
@@ -129,21 +134,23 @@ export class InventoryAutomatic {
     return this.status()
   }
   /** One bounded source page. Only an entirely seeded, still-current COMPLETE generation may execute. */
-  async plan(now = Date.now(), limit = 100) {
+  async plan(now = Date.now(), limit = 100, generation?: string) {
     z.number().int().min(1).max(500).parse(limit)
     const run = await this.env.DB.prepare(
-      `SELECT r.* FROM inventory_source_current c JOIN inventory_source_runs r ON r.id=c.generation AND r.state='COMPLETE' JOIN title_audit_store t ON t.singleton=1 AND t.seller=c.seller`,
-    ).first<{
+      `SELECT r.id,r.seller,r.started_at,r.activated_at FROM inventory_source_current c
+       JOIN inventory_source_runs r ON r.id=c.generation AND r.state='COMPLETE'
+       JOIN title_audit_store t ON t.singleton=1 AND t.seller=c.seller
+       WHERE (? IS NULL OR r.id=?)`,
+    ).bind(generation ?? null, generation ?? null).first<{
       id: string
       seller: string
       started_at: number
       activated_at: number
-      connection_revision: string | null
     }>()
-    if (!run) return { complete: false, rows: 0 }
+    if (!run) return { complete: generation !== undefined, rows: 0 }
     const activation = await this.env.DB.prepare(
-      'SELECT activated_after,enabled FROM inventory_automatic_settings WHERE singleton=1',
-    ).first<{ activated_after: number | null; enabled: number }>()
+      'SELECT activated_after,enabled,new_listings_enabled FROM inventory_automatic_settings WHERE singleton=1',
+    ).first<{ activated_after: number | null; enabled: number; new_listings_enabled: number }>()
     if (!activation?.enabled) return { complete: true, rows: 0, disabled: true }
     if (
       activation?.enabled &&
@@ -165,9 +172,19 @@ export class InventoryAutomatic {
     if (progress.state === 'COMPLETE') return { complete: true, rows: 0 }
     const page = (
       await this.env.DB.prepare(
-        `SELECT r.*,q.ordered_generation,q.new_generation,h.sku AS history_sku FROM inventory_source_rows r LEFT JOIN inventory_source_qualifications q ON q.seller=? AND q.sku=r.sku LEFT JOIN (SELECT q.seller,q.sku FROM inventory_order_history_qualifications q JOIN inventory_order_history_runs h ON h.id=q.evidence_run AND h.state='COMPLETE' AND h.seller=q.seller) h ON h.seller=(SELECT seller FROM inventory_source_runs WHERE id=r.generation) AND h.sku=r.sku WHERE r.generation=? AND r.sku>? AND r.listing_status NOT IN('banned','stopped','closed','suppressed') AND (r.ordered=1 OR r.new_listing=1 OR q.ordered_generation IS NOT NULL OR q.new_generation IS NOT NULL OR h.sku IS NOT NULL) AND (r.sellable IS NULL OR r.sellable < CASE WHEN r.ordered=1 OR q.ordered_generation IS NOT NULL OR h.sku IS NOT NULL THEN 5 ELSE 2 END) ORDER BY r.sku LIMIT ?`,
+        `SELECT r.sku,r.sellable,r.listing_status,r.created_at,r.ordered,r.new_listing,q.ordered_generation,q.new_generation,
+           history.id AS history_run,e.ordered_scan_id
+         FROM inventory_source_rows r
+         LEFT JOIN inventory_source_qualifications q ON q.seller=?1 AND q.sku=r.sku
+         LEFT JOIN inventory_order_history_qualifications h ON h.seller=?1 AND h.sku=r.sku
+         LEFT JOIN inventory_order_history_runs history ON history.id=h.evidence_run AND history.seller=h.seller AND history.state='COMPLETE'
+         LEFT JOIN inventory_replenishment_eligibility e ON e.sku_key=json_array(?1,'ATVPDKIKX0DER','A1C5',r.sku)
+         WHERE r.generation=? AND r.sku>? AND r.listing_status NOT IN('banned','stopped','closed','suppressed')
+         AND (r.ordered=1 OR q.ordered_generation IS NOT NULL OR history.id IS NOT NULL OR e.ordered_scan_id IS NOT NULL
+           OR (?=1 AND (r.new_listing=1 OR q.new_generation IS NOT NULL)))
+         AND (r.sellable IS NULL OR r.sellable < 5) ORDER BY r.sku LIMIT ?`,
       )
-        .bind(run.seller, run.id, progress.cursor, limit)
+        .bind(run.seller, run.id, progress.cursor, activation.new_listings_enabled, limit)
         .all<{
           sku: string
           sellable: number | null
@@ -177,10 +194,21 @@ export class InventoryAutomatic {
           new_listing: number
           ordered_generation: string | null
           new_generation: string | null
-          history_sku: string | null
+          history_run: string | null
+          ordered_scan_id: string | null
         }>()
     ).results
-    const rows = page.map((r) => ({
+    const isOrdered = (r: (typeof page)[number]) =>
+      r.ordered === 1 || !!r.ordered_generation || !!r.history_run || !!r.ordered_scan_id
+    const targetFive = await fiveUnitNewListings(
+      this.env.DB,
+      run.seller,
+      page.filter((r) => !isOrdered(r)).map((r) => r.sku),
+    )
+    const candidates = page.filter(
+      (r) => r.sellable === null || r.sellable < (isOrdered(r) || targetFive.has(r.sku) ? 5 : 2),
+    )
+    const rows = candidates.map((r) => ({
       ...scopeFor(run.seller),
       binCode: 'Default',
       inventoryType: 'GOOD',
@@ -188,41 +216,47 @@ export class InventoryAutomatic {
       sellable: r.sellable,
       listingStatus: r.listing_status,
       createdAt: r.created_at,
-      hasOrdered: r.ordered === 1 || r.ordered_generation || r.history_sku ? true : null,
+      hasOrdered: isOrdered(r) ? true : null,
       observedAt: run.started_at,
     }))
     if (rows.length) {
-      const scanId =
-        'automatic-' + run.id + '-' + (await hash(JSON.stringify({ cursor: progress.cursor, rows })))
+      const digest = await hash(JSON.stringify({ cursor: progress.cursor, rows, targetFive: [...targetFive] }))
+      const scanId = 'automatic-' + run.id + '-' + digest
       await this.queue.scan(
         scanId,
         rows,
-        { complete: true, source: 'automatic-source-candidates', automaticGeneration: run.id },
+        {
+          complete: true,
+          source: 'automatic-source-candidates',
+          automaticGeneration: run.id,
+          fiveUnitNewListings: targetFive,
+        },
         Math.max(now, run.started_at),
       )
-      for (let offset = 0; offset < rows.length; offset += 25)
-        await this.env.DB.batch(
-          rows
-            .slice(offset, offset + 25)
-            .flatMap((row, index) => [
-              this.env.DB.prepare(
-                'INSERT INTO inventory_automatic_candidates VALUES(?,?) ON CONFLICT DO NOTHING',
-              ).bind(run.id, inventoryKey(row)),
-              ...(page[offset + index].new_listing || page[offset + index].new_generation
-                ? [
-                    this.env.DB.prepare(
-                      'UPDATE inventory_replenishment_eligibility SET new_listing_scan_id=COALESCE(new_listing_scan_id,?) WHERE sku_key=?',
-                    ).bind(scanId, skuKey(row)),
-                  ]
-                : []),
-            ]),
-        )
+      for (let offset = 0; offset < rows.length; offset += 75) {
+        const batch = rows.slice(offset, offset + 75)
+        const newKeys = batch
+          .filter((_, index) => candidates[offset + index].new_listing || candidates[offset + index].new_generation)
+          .map(skuKey)
+        await this.env.DB.batch([
+          this.env.DB.prepare(`INSERT INTO inventory_automatic_candidates
+            SELECT ?,value FROM json_each(?) WHERE true ON CONFLICT DO NOTHING`)
+            .bind(run.id, JSON.stringify(batch.map(inventoryKey))),
+          ...(newKeys.length ? [
+            this.env.DB.prepare(`UPDATE inventory_replenishment_eligibility SET new_listing_scan_id=?
+              WHERE new_listing_scan_id IS NULL AND sku_key IN (SELECT value FROM json_each(?))`)
+              .bind(scanId, JSON.stringify(newKeys)),
+          ] : []),
+        ])
+      }
       // Candidate quantities are estimates only; review status is preserved and every permit requires fresh API preflight.
       await this.env.DB.prepare(
-        `UPDATE inventory_replenishment_demands SET quantity=(CASE WHEN json_extract(observation_json,'$.hasOrdered')=1 THEN 5 ELSE 2 END)-COALESCE(json_extract(observation_json,'$.sellable'),0) WHERE scan_id=? AND action='review'`,
+        `UPDATE inventory_replenishment_demands SET quantity=(CASE WHEN json_extract(observation_json,'$.hasOrdered')=1 OR json_extract(observation_json,'$.sku') IN (SELECT value FROM json_each(?)) THEN 5 ELSE 2 END)-COALESCE(json_extract(observation_json,'$.sellable'),0) WHERE scan_id=? AND action='review'`,
       )
-        .bind(scanId)
+        .bind(JSON.stringify([...targetFive]), scanId)
         .run()
+    }
+    if (page.length) {
       await this.env.DB.prepare(
         "UPDATE inventory_automatic_generations SET cursor=?,updated_at=? WHERE generation=? AND cursor=? AND state='SEEDING'",
       )
@@ -235,16 +269,17 @@ export class InventoryAutomatic {
       )
         .bind(now, run.id, page.at(-1)?.sku ?? progress.cursor)
         .run()
-    return { complete: page.length < limit, rows: page.length, generation: run.id }
+    return { complete: page.length < limit, rows: rows.length, generation: run.id }
   }
-  private view(job: Job) {
+  private view(job: Job, includeRows = true) {
     return {
       id: job.id,
       leaseId: job.leaseId,
       mode: 'AUTO_REPLENISH' as const,
+      ...(job.channel === 'BULK' ? { bulk: true as const } : {}),
       state: job.state,
       rows:
-        job.state === 'CLAIMED'
+        !includeRows ? [] : job.state === 'CLAIMED'
           ? job.rows
               .filter((r) => r.outcome === 'PENDING')
               .map((r) => ({
@@ -255,7 +290,7 @@ export class InventoryAutomatic {
                 disposition: 'GOOD' as const,
               }))
           : fileRows(job),
-      rowStates: job.rows.map((r) => ({ sku: r.sku, outcome: r.outcome, active: r.active })),
+      rowStates: includeRows ? job.rows.map((r) => ({ sku: r.sku, outcome: r.outcome, active: r.active })) : [],
       warehouseCode: 'A1C5' as const,
       expiresAt: job.lease_until,
       filename: job.filename,
@@ -296,12 +331,17 @@ export class InventoryAutomatic {
         )`),
     ])
   }
-  async claim(device: LiveDevice, now = Date.now(), input: unknown = {}) {
+  async claim(device: LiveDevice, now = Date.now(), input: unknown = {}, requireBulk = false) {
     const request = z
-      .object({ previousJobId: id.optional(), previousLeaseId: id.optional() })
+      .object({ previousJobId: id.optional(), previousLeaseId: id.optional(), bulk: z.literal(true).optional() })
       .strict()
       .refine((v) => !!v.previousJobId === !!v.previousLeaseId)
       .parse(input)
+    if (request.bulk && requireBulk) {
+      await this.env.DB.prepare(`UPDATE inventory_devices SET bulk_seen_at=?
+        WHERE id=? AND revoked_at IS NULL AND scope_json=? AND COALESCE(bulk_seen_at,0)<?`)
+        .bind(now, device.id, device.scope_json, now - 60_000).run()
+    }
     await this.retireStaleUnsubmitted()
     await this.queue.recover(now)
     let previousJob: Record<string, unknown> | null = null
@@ -350,6 +390,7 @@ export class InventoryAutomatic {
       .bind(device.id, device.scope_json)
       .first<{ job_id: string }>()
     if (existing) return { job: this.view(await this.queue.job(existing.job_id)), previousJob }
+    if (requireBulk && !request.bulk) return { job: null, previousJob }
     const { identity } = await sourceConnection(this.env)
     if (device.scope_json !== JSON.stringify(scopeFor(identity.seller)))
       return { job: null, previousJob }
@@ -365,7 +406,7 @@ export class InventoryAutomatic {
     const job = await this.queue.claim(
       scopeKey(scopeFor(identity.seller)),
       now,
-      10,
+      request.bulk ? automaticFileMaxRows : 10,
       undefined,
       undefined,
       {
@@ -375,6 +416,7 @@ export class InventoryAutomatic {
         revision: identity.revision,
         generation: run.id,
         credentialStamp: stamp?.stamp ?? 'null',
+        bulk: request.bulk,
       },
     )
     return { job: job ? this.view(job) : null, previousJob }
@@ -397,30 +439,36 @@ export class InventoryAutomatic {
     const { owner, job } = await this.owned(device, input)
     if (job.state !== 'CLAIMED') return { job: this.view(job) }
     const enabled = await this.env.DB.prepare(
-      'SELECT 1 FROM inventory_automatic_settings WHERE singleton=1 AND enabled=1',
-    ).first()
+      'SELECT new_listings_enabled FROM inventory_automatic_settings WHERE singleton=1 AND enabled=1',
+    ).first<{ new_listings_enabled: number }>()
     if (!enabled) throw conflict('自动补库已关闭。')
     const { identity } = await sourceConnection(this.env, {
       seller: owner.seller,
       revision: owner.connection_revision,
     })
     const observations: InventoryObservation[] = []
-    const batch = this.customReader
-      ? null
-      : await this.reader(
-          identity,
-          job.rows.filter((r) => r.outcome === 'PENDING').map((r) => r.sku),
-          now,
-        ).catch(() => null)
+    const pending = job.rows.filter((r) => r.outcome === 'PENDING')
+    const bulkId = job.channel === 'BULK' ? await this.queue.beginBulkPreflight(job.id, job.leaseId, now) : undefined
+    const selected = bulkId
+      ? pending.filter((r) => r.preflightId !== bulkId || (r.preflightAt ?? 0) < now - bulkPreflightFreshMs)
+          .slice(0, automaticReadGroupSize)
+      : pending
+    const batch = selected.length && (!this.customReader || bulkId)
+      ? await this.reader(identity, selected.map((r) => r.sku), now, Boolean(bulkId)).catch(() => {
+          if (bulkId) throw conflict('批量库存复核暂不可用，将继续复核此批。')
+          return null
+        })
+      : null
     if (batch?.evidence && this.env.ARCHIVE)
       await this.env.ARCHIVE.put(
         `inventory-automatic/${job.id}/preflight-${now}-${crypto.randomUUID()}.json`,
         JSON.stringify(batch),
       )
-    for (const row of job.rows.filter((r) => r.outcome === 'PENDING')) {
+    const retries: string[] = []
+    for (const row of selected) {
       let reading: InventoryObservation
       try {
-        if (this.customReader) reading = await this.readOne(identity, row.sku, now)
+        if (this.customReader && !bulkId) reading = await this.readOne(identity, row.sku, now)
         else {
           const matches = batch?.observations.filter((r) => r.sku === row.sku)
           if (matches?.length !== 1) throw Error('SOURCE_READING_MISSING')
@@ -429,19 +477,30 @@ export class InventoryAutomatic {
             throw Error('SOURCE_READING_SCOPE')
         }
       } catch {
-        const { rowId, quantity, fileRow, outcome, active, ...observation } = row
+        const { rowId, quantity, fileRow, preflightAt, preflightId, outcome, active, ...observation } = row
         reading = { ...observation, sellable: null, listingStatus: 'unknown', observedAt: now }
       }
       observations.push(reading)
       if (reading.sellable === null || ['unknown', 'suppressed'].includes(reading.listingStatus))
-        await this.env.DB.prepare(
-          'UPDATE inventory_replenishment_demands SET retry_at=? WHERE inventory_key=?',
-        )
-          .bind(now + 120000, inventoryKey(reading))
-          .run()
+        retries.push(inventoryKey(reading))
     }
+    const targetFive = enabled.new_listings_enabled === 1 ? await fiveUnitNewListings(
+      this.env.DB,
+      owner.seller,
+      observations.filter((r) => r.hasOrdered !== true).map((r) => r.sku),
+    ) : undefined
     const permitNow = arguments.length < 3 ? Date.now() : now
-    const checked = await this.queue.preflight(job.id, job.leaseId, observations, permitNow)
+    const checked = await this.queue.preflight(job.id, job.leaseId, observations, permitNow, {
+      fiveUnitNewListings: targetFive,
+      orderedOnly: enabled.new_listings_enabled === 0,
+      bulkId,
+    })
+    if (retries.length) {
+      await this.env.DB.prepare(`UPDATE inventory_replenishment_demands SET retry_at=?
+        WHERE inventory_key IN (SELECT value FROM json_each(?)) AND observed_at=?`)
+        .bind(permitNow + 120000, JSON.stringify(retries), now).run()
+    }
+    if (bulkId && selected.length) return { pending: true as const, job: this.view(checked, false) }
     if (checked.state === 'SKIPPED') return { job: this.view(checked) }
     const rows = fileRows(checked),
       file = await receiveFile(rows)
@@ -527,50 +586,59 @@ export class InventoryAutomatic {
     await this.queue.recover(now)
     const rows = (
       await this.env.DB.prepare(
-        `SELECT r.id,r.observation_json,a.job_id,a.seller,a.connection_revision
+        `SELECT r.id,r.observation_json,a.job_id,a.seller,j.channel
          FROM inventory_automatic_jobs a JOIN inventory_replenishment_rows r ON r.job_id=a.job_id
-         WHERE r.active=1 AND r.outcome IN('SUCCEEDED','UNKNOWN') AND a.job_id=(
+         JOIN inventory_replenishment_jobs j ON j.id=a.job_id
+         WHERE r.active=1 AND r.outcome IN('SUCCEEDED','UNKNOWN') AND r.reconcile_after<=? AND a.job_id=(
            SELECT q.job_id FROM inventory_automatic_jobs q WHERE q.reconcile_at<=?
            AND EXISTS(SELECT 1 FROM inventory_replenishment_rows pending WHERE pending.job_id=q.job_id
-             AND pending.active=1 AND pending.outcome IN('SUCCEEDED','UNKNOWN'))
+             AND pending.active=1 AND pending.outcome IN('SUCCEEDED','UNKNOWN') AND pending.reconcile_after<=?)
            ORDER BY q.reconcile_at,q.created_at,q.job_id LIMIT 1
-         )`,
+         ) ORDER BY r.reconcile_after,r.id LIMIT ?`,
       )
-        .bind(now)
+        .bind(now, now, now, automaticReadGroupSize)
         .all<{
           id: string
           job_id: string
           observation_json: string
           seller: string
-          connection_revision: string
+          channel: string
         }>()
     ).results
     let reconciled = 0
     const grouped = new Map<string, typeof rows>()
     for (const row of rows) grouped.set(row.job_id, [...(grouped.get(row.job_id) ?? []), row])
     for (const [jobId, group] of grouped) {
+      const bulk = group[0].channel === 'BULK'
       const lock = await this.env.DB.prepare(
         'UPDATE inventory_automatic_jobs SET reconcile_at=? WHERE job_id=? AND reconcile_at<=? RETURNING job_id',
       )
-        .bind(now + 120000, jobId, now)
+        .bind(now + (bulk ? 25_000 : 120_000), jobId, now)
         .first()
       if (!lock) continue
       try {
+        if (bulk) await this.env.DB.prepare(`UPDATE inventory_replenishment_rows SET reconcile_after=?
+          WHERE job_id=? AND id IN(SELECT value FROM json_each(?)) AND active=1`)
+          .bind(now + 120_000, jobId, JSON.stringify(group.map((r) => r.id))).run()
         const { identity } = await sourceConnection(this.env)
         if (identity.seller !== group[0].seller) continue
         const snapshot = await this.reader(
           identity,
           group.map((r) => (JSON.parse(r.observation_json) as InventoryObservation).sku),
           now,
+          bulk,
         )
+        const verified: InventoryObservation[] = []
         for (const row of group) {
           const original = JSON.parse(row.observation_json) as InventoryObservation
           const matches = snapshot.observations.filter((r) => r.sku === original.sku)
           if (matches.length !== 1) continue
           const reading = observationSchema.parse(matches[0])
           if (inventoryKey(reading) !== inventoryKey(original) || reading.observedAt !== now) continue
-          if (await this.queue.reconcile(row.id, reading, now)) reconciled++
+          if (bulk) verified.push(reading)
+          else if (await this.queue.reconcile(row.id, reading, now)) reconciled++
         }
+        if (bulk) reconciled += await this.queue.reconcileBulk(jobId, verified, now)
       } catch {
         /* Retain submission locks; per-SKU read failures in the batch reader become unknown observations. */
       }

@@ -37,6 +37,7 @@ function fixture() {
   sqlite.exec(readFileSync('migrations/0045_inventory_device_handoff.sql', 'utf8'))
   sqlite.exec(readFileSync('migrations/0046_inventory_automatic.sql', 'utf8'))
   sqlite.exec(readFileSync('migrations/0047_inventory_order_history.sql', 'utf8'))
+  sqlite.exec(readFileSync('migrations/0058_inventory_new_listing_pause.sql', 'utf8'))
   function prepare(sql: string, values: SQLInputValue[] = []) {
     const stmt = sqlite.prepare(sql)
     return {
@@ -48,19 +49,23 @@ function fixture() {
     }
   }
   let beforeBatch: ((sql: string[]) => Promise<void>) | null = null
+  let afterBatch: ((sql: string[]) => Promise<void>) | null = null
   const DB = {
     prepare,
     batch: async (statements: ReturnType<typeof prepare>[]) => {
-      if (beforeBatch) await beforeBatch(statements.map((s) => s.sql))
+      const sql = statements.map((s) => s.sql)
+      if (beforeBatch) await beforeBatch(sql)
       sqlite.exec('BEGIN')
+      let result: ReturnType<ReturnType<typeof prepare>['run']>[]
       try {
-        const result = statements.map((s) => s.run())
+        result = statements.map((s) => s.run())
         sqlite.exec('COMMIT')
-        return result
       } catch (error) {
         sqlite.exec('ROLLBACK')
         throw error
       }
+      if (afterBatch) await afterBatch(sql)
+      return result
     },
   } as unknown as D1Database
   const env = { DB, SP_CLIENT_ID: 'client', SP_CLIENT_SECRET: 'secret', SP_REFRESH_TOKEN: 'refresh' }
@@ -93,6 +98,9 @@ function fixture() {
     },
     beforeBatch: (fn: typeof beforeBatch) => {
       beforeBatch = fn
+    },
+    afterBatch: (fn: typeof afterBatch) => {
+      afterBatch = fn
     },
   }
 }
@@ -309,9 +317,9 @@ it('never returns a replacement lease or CSV to a device switched after the subm
   const f = fixture()
   try {
     const { trialId, keys } = await claimed(f)
-    f.beforeBatch(async (sql) => {
+    f.afterBatch(async (sql) => {
       if (!sql.some((s) => s.includes('SET file_row='))) return
-      f.beforeBatch(null)
+      f.afterBatch(null)
       await switchTo(f, trialId)
     })
     await expect(f.live.prepare(a, keys, now + 20)).rejects.toThrow()

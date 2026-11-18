@@ -1,10 +1,11 @@
 import { PDFDocument, PrintScaling } from 'pdf-lib'
 import { PublicError } from '../contracts/errors'
-import { connectionDigest, inventoryDeviceScope } from '../inventory-sync/connection'
+import { connectionDigest } from '../inventory-sync/connection'
 import { pdfHash } from '../product-labels/cache'
 import { downloadMergedProductLabels, type ProductLabelEnvironment } from '../product-labels/download'
 import { checkPackLabelQuantity } from './pack-label-limits'
-import type { PackBatch } from './pack-types'
+import type { OrderOutputBatch } from './pack-types'
+import { orderOutputScope } from './output-scope'
 
 type Env = ProductLabelEnvironment & { ARCHIVE: R2Bucket }
 const templateKey = 'product-labels/eu-rep-ceramic-80mm-v1.pdf'
@@ -27,19 +28,7 @@ export class PackApiLabels {
       (n) => n.toString(16).padStart(2, '0'),
     ).join('')
   }
-  private async scope(batch: PackBatch) {
-    const scope = await inventoryDeviceScope(this.env.DB)
-    const record = await this.env.DB.prepare('SELECT scope_key FROM pack_order_batches WHERE id=?')
-      .bind(batch.id)
-      .first<{ scope_key: string }>()
-    const expected = await connectionDigest(
-      JSON.stringify([scope.sellerAccountId, scope.marketplaceId, scope.warehouseCode]),
-    )
-    if (!record || record.scope_key !== expected)
-      throw new PublicError('FORBIDDEN', '本批次不属于当前 Amazon 店铺，不能获取或生成标签。', 403)
-    return scope
-  }
-  private async key(batch: PackBatch, group: string, revision: string) {
+  private async key(batch: OrderOutputBatch, group: string, revision: string) {
     // The original plan is immutable; include its contents to fail closed if that ever changes.
     const plan = batch.plan?.groups.find((item) => item.name === group)
     if (!plan) throw new PublicError('NOT_FOUND', '没有找到该分拣组。', 404)
@@ -75,11 +64,11 @@ export class PackApiLabels {
       return null
     }
   }
-  async view(batch: PackBatch): Promise<PackBatch> {
+  async view<T extends OrderOutputBatch>(batch: T): Promise<T> {
     const groups = batch.plan?.groups ?? []
     let revision = ''
     try {
-      await this.scope(batch)
+      await orderOutputScope(this.env.DB, batch)
       revision = await this.revision()
     } catch {
       /* Ready must never fall back to old Flex files. */
@@ -101,7 +90,7 @@ export class PackApiLabels {
           : 'LABELS_PENDING',
     }
   }
-  async prepare(batch: PackBatch): Promise<PackBatch> {
+  async prepare<T extends OrderOutputBatch>(batch: T): Promise<T> {
     try {
       for (const group of batch.plan?.groups ?? []) await this.download(batch, group.name)
       return await this.view(batch)
@@ -113,12 +102,13 @@ export class PackApiLabels {
       }
     }
   }
-  async download(batch: PackBatch, group: string) {
-    const scope = await this.scope(batch)
+  async download(batch: OrderOutputBatch, group: string, cachedOnly = false) {
+    const scope = await orderOutputScope(this.env.DB, batch)
     const revision = await this.revision()
     const key = await this.key(batch, group, revision)
     let bytes = await this.cached(key)
     if (!bytes) {
+      if (cachedOnly) throw unavailable()
       const plan = batch.plan!.groups.find((item) => item.name === group)!
       checkPackLabelQuantity(plan)
       const chunks: { sku: string; fnsku: string; units: number }[][] = []

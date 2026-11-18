@@ -1,6 +1,8 @@
 import { z } from 'zod'
+import { acquireSlot, observeLimit } from '../amazon/request-pacing'
 import { type ConnectionBindings, providerCredentials } from '../connections/credentials'
 import { PublicError } from '../contracts/errors'
+import { fiveUnitNewListings } from './new-listing-targets'
 
 export const sourceMarket = 'ATVPDKIKX0DER'
 export type SourceIdentity = { seller: string; revision: string }
@@ -75,6 +77,7 @@ export function sourceDecision(
   },
   activatedAt: number,
   observedAt = Date.now(),
+  newListingTarget: 2 | 5 = 2,
 ) {
   const channel = sourceChannel(row.sku)
   let hold = 'SIMULATION_ONLY',
@@ -92,7 +95,7 @@ export function sourceDecision(
       row.createdAt <= observedAt &&
       row.createdAt >= activatedAt - 7 * 86400000)
   ) {
-    candidateQuantity = Math.max(0, 2 - row.sellable)
+    candidateQuantity = Math.max(0, newListingTarget - row.sellable)
     if (!candidateQuantity) hold = 'TARGET_MET'
   } else hold = row.sellable === 0 ? 'ZERO_ELIGIBILITY_UNKNOWN' : 'ELIGIBILITY_UNKNOWN'
   return {
@@ -566,12 +569,18 @@ export async function inventorySourceCandidates(db: D1Database, input: unknown =
       creationSource: string | null
       orderedEvidence: string | null
     }>()
+  const page = result.results.slice(0, options.limit)
+  const targetFive = await fiveUnitNewListings(
+    db,
+    current.seller,
+    page.filter((row) => !row.ordered && row.sellable !== null && row.sellable < 5).map((row) => row.sku),
+  )
   const more = result.results.length > options.limit,
-    rows = result.results.slice(0, options.limit).map((row) => {
+    rows = page.map((row) => {
       const value = { ...row, ordered: row.ordered === 1 ? true : null, newListing: !!row.newListing }
       return {
         ...value,
-        ...sourceDecision(value, current.activated_at, current.started_at),
+        ...sourceDecision(value, current.activated_at, current.started_at, targetFive.has(row.sku) ? 5 : 2),
         generation: current.id,
         observedAt: current.started_at,
         inventoryReport: current.inventory_report,
@@ -599,7 +608,7 @@ export class AmazonSourceClient {
   private async json(
     path: string,
     body?: unknown,
-    service: 'reports' | 'fba' = 'reports',
+    service: 'reports' | 'fba' | 'stock-delta' = 'reports',
   ): Promise<Record<string, unknown>> {
     try {
       const c = this.expected
@@ -626,6 +635,7 @@ export class AmazonSourceClient {
           expires: Date.now() + Math.max(0, (raw.expires_in ?? 300) - 60) * 1000,
         }
       }
+      if (service === 'stock-delta') await acquireSlot(this.env.DB, 'inventory-read', 5000)
       const response = await this.request(
         'https://sellingpartnerapi-na.amazon.com/' +
           (service === 'reports' ? 'reports/2021-06-30/' : 'fba/inventory/v1/') +
@@ -638,6 +648,8 @@ export class AmazonSourceClient {
           signal: AbortSignal.timeout(20000),
         },
       )
+      if (service === 'stock-delta')
+        await observeLimit(this.env.DB, 'inventory-read', response.headers, response.status === 429)
       if (!response.ok) {
         if (response.status === 401) this.token = undefined
         throw new Error('SOURCE_AMAZON_REQUEST_FAILED_SP_HTTP_' + response.status)
@@ -707,6 +719,18 @@ export class AmazonSourceClient {
       stockAuthority: 'AMAZON_SP_API' as const,
       executionEligible: false,
     }
+  }
+  async inventoryChanges(from: number, nextToken?: string) {
+    const query = new URLSearchParams({
+      granularityType: 'Marketplace', granularityId: sourceMarket, marketplaceIds: sourceMarket,
+      details: 'true', startDateTime: new Date(from).toISOString(),
+      ...(nextToken ? { nextToken } : {}),
+    })
+    const value = z.object({
+      payload: z.object({ inventorySummaries: z.array(z.record(z.string(), z.unknown())) }),
+      pagination: z.object({ nextToken: z.string().optional() }).optional(),
+    }).parse(await this.json('summaries?' + query, undefined, 'stock-delta'))
+    return { rows: value.payload.inventorySummaries, nextToken: value.pagination?.nextToken ?? null }
   }
   async poll(id: string) {
     const r = await this.json('reports/' + encodeURIComponent(id))

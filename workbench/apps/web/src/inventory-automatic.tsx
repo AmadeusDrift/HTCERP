@@ -2,6 +2,7 @@ import { ErrorBox, Loading, Notice, Panel, useData, useWrite } from './ui'
 
 type AutomaticStatus = {
   enabled: boolean
+  newListingsEnabled: boolean
   intervalMinutes: number
   activatedAfter: number | null
   maxRows: number
@@ -36,7 +37,9 @@ export function InventoryAutomatic() {
             </Notice>
             <p>
               开启时跳过已有批次及正在进行的巡查，从下一次新启动的巡查结果开始处理。 仅处理符合规则的 JIT
-              / J1T，上传前重新读取 API，出单商品低于 5 补到 5，未出单新品低于 2 补到 2，其他老商品不补。
+              / J1T，上传前重新读取 API。{data.newListingsEnabled
+                ? '已出单商品及 A/B 组新品补到 5 件，C 组、集美组和未归组新品补到 2 件，其他未出单老商品不补。'
+                : '当前只处理已出单商品，补到 5 件。未出单新品暂停自动补库。'}
             </p>
             {data.activatedAfter && (
               <p className="muted">

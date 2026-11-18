@@ -162,8 +162,8 @@ export function InventorySync() {
             ERP”即可登记这台电脑。每台电脑独立连接，无需复制 Amazon 密钥。
           </p>
           <p>
-            <a href="/downloads/SellerFlex-Batch-Inventory-v0.7.1.zip" download>
-              下载插件 v0.7.1
+            <a href="/downloads/SellerFlex-Batch-Inventory-v0.7.3.zip" download>
+              下载插件 v0.7.3
             </a>{' '}
             · 解压后在浏览器扩展管理中加载；升级旧版请重新加载扩展，并刷新 ERP 和 Seller Flex 页面。
           </p>

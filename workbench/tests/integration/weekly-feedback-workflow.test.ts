@@ -413,6 +413,8 @@ it('launches the filtered weekly report once at Wednesday Beijing 09:00', async 
     db.exec("INSERT INTO title_audit_store VALUES(1,'SELLERA',0)")
     const monday = Date.parse('2026-11-09T01:00:00Z')
     const wednesday = monday + 2 * 86400000
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(wednesday)
     await scheduleWeeklyFeedback(bindings, wednesday)
     expect(create).not.toHaveBeenCalled()
     db.exec('UPDATE weekly_feedback_settings SET enabled=1')
@@ -429,6 +431,7 @@ it('launches the filtered weekly report once at Wednesday Beijing 09:00', async 
     expect((await launchWeeklyFeedback(bindings, 'SELLERA')).id).toBeTruthy()
     expect(create).toHaveBeenCalledTimes(1)
   } finally {
+    vi.useRealTimers()
     db.close()
   }
 })

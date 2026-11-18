@@ -10,6 +10,9 @@ import { PackFactoryPackages } from './pack-factory'
 
 // Mount under the existing session authentication/ERP read permissions.
 export const packOrdersRoutes = new Hono<AppEnv>()
+packOrdersRoutes.get('/:id/factory-preview', async (c) =>
+  c.json(await new PackFactoryPackages(c.env).preview(c.req.param('id'))),
+)
 packOrdersRoutes.post('/:id/factory-package', async (c) =>
   c.json(await new PackFactoryPackages(c.env).prepare(c.req.param('id'))),
 )
@@ -67,7 +70,7 @@ packOrdersRoutes.get('/:id/labels/:rowIndex', () => {
 })
 
 // Device authentication stays in the existing InventoryDevices implementation.
-export function streamPackLabelResult(prepare: () => Promise<PackBatch>) {
+export function streamPackLabelResult<T>(prepare: () => Promise<T>) {
   // MV3 terminates fetches whose response headers do not arrive within 30 seconds.
   // Send valid JSON whitespace immediately, then the final JSON after generation.
   const encoder = new TextEncoder()

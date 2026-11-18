@@ -17,6 +17,8 @@ const rowSchema = z
   })
   .strict()
 export type ReceiveRow = z.infer<typeof rowSchema>
+export const receiveFileMaxRows = 3000
+export const automaticFileMaxRows = 2900
 const header =
   'BIN,Merchant SKU,Quantity,Disposition (GOOD/BAD),Expiration Date (DD/MM/YYYY),Manufacturing Date (DD/MM/YYYY)'
 const cell = (value: string) => (/[",]/.test(value) ? '"' + value.replace(/"/g, '""') + '"' : value)
@@ -24,7 +26,7 @@ const date = (value: string | null | undefined) => (value ? value.split('-').rev
 
 /** Generates new UTF-8 content exclusively from effective business rows; never edits a prior workbook. */
 export async function receiveFile(input: ReceiveRow[]) {
-  const rows = z.array(rowSchema).min(1).parse(input)
+  const rows = z.array(rowSchema).min(1).max(receiveFileMaxRows).parse(input)
   if (new Set(rows.map((r) => r.rowId)).size !== rows.length) throw new Error('文件包含重复业务行。')
   const csv = [
     header,

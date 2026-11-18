@@ -5,6 +5,65 @@ import { expect, it } from 'vitest'
 const edge = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'
 const executablePath = process.env.PLAYWRIGHT_BROWSER_PATH ?? (existsSync(edge) ? edge : undefined)
 
+it('queues and submits the two parts of an oversized Receive CSV once each', async () => {
+  const browser = await chromium.launch({ executablePath, headless: true })
+  try {
+    const page = await browser.newPage()
+    await page.route('**/*', (route) => {
+      if (route.request().url() !== 'https://sellerflex.amazon.com/receive') return route.abort()
+      return route.fulfill({ contentType: 'text/html', body: `
+        <nav><button role="combobox">A1C5</button></nav>
+        <main>
+          <div><button>Upload inventory file</button><input type="file" id="native"></div>
+          <table><thead><tr><th>Time</th><th>Uploaded file</th><th>Status</th><th>Errors</th></tr></thead>
+          <tbody></tbody></table>
+        </main>` })
+    })
+    await page.goto('https://sellerflex.amazon.com/receive')
+    await page.addScriptTag({ content: `
+      const attachShadow = Element.prototype.attachShadow;
+      Element.prototype.attachShadow = function () { return attachShadow.call(this, {mode: 'open'}); };
+      const receipts = new Map();
+      globalThis.SellerFlexManualStorage = {
+        get: async key => ({[key]: receipts.get(key)}),
+        set: async values => Object.entries(values).forEach(([key, value]) => receipts.set(key, value)),
+        remove: async key => receipts.delete(key),
+      };
+      document.getElementById('native').addEventListener('change', async event => {
+        const file = event.target.files[0];
+        const count = (await file.text()).trimEnd().split('\\r\\n').length - 1;
+        const row = document.querySelector('tbody').insertRow();
+        for (const value of [String(count), file.name, 'Completed', '0']) row.insertCell().textContent = value;
+      });
+    ` })
+    for (const name of ['preflight.js', 'inventory.js']) {
+      const file = new URL(`../../extensions/sellerflex-inventory/${name}`, import.meta.url)
+      await page.addScriptTag({ content: readFileSync(file, 'utf8') })
+    }
+    const header = 'BIN,Merchant SKU,Quantity,Disposition (GOOD/BAD),Expiration Date (DD/MM/YYYY),Manufacturing Date (DD/MM/YYYY)'
+    const upload = {
+      name: 'inventory.csv',
+      mimeType: 'text/csv',
+      buffer: Buffer.from([header, ...Array(3001).fill('Default,SKU-JIT,1,GOOD,,'), ''].join('\r\n')),
+    }
+    const helper = page.locator('#seller-flex-inventory-extension')
+    const nativeCounts = page.locator('tbody tr td:first-child')
+    await helper.locator('#files').setInputFiles(upload)
+    await helper.locator('#queue li[data-state="ready"]').nth(1).waitFor()
+    await helper.locator('#start').click()
+    await helper.locator('#queue li[data-state="complete"]').nth(1).waitFor()
+    expect(await nativeCounts.allTextContents()).toEqual(['3000', '1'])
+    await helper.locator('#clear').click()
+    await helper.locator('#files').setInputFiles(upload)
+    await helper.locator('#queue li[data-state="ready"]').nth(1).waitFor()
+    await helper.locator('#start').click()
+    await helper.locator('#queue li[data-state="duplicate"]').nth(1).waitFor()
+    expect(await nativeCounts.allTextContents()).toEqual(['3000', '1'])
+  } finally {
+    await browser.close()
+  }
+}, 20000)
+
 it('matches actual duplicate-header tables and role-button filename; refuses partial success and duplicate rows', async () => {
   const browser = await chromium.launch({
     executablePath,

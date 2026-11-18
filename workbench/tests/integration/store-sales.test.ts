@@ -53,7 +53,7 @@ it('starts the four Beijing slots only when a destination is enabled', async () 
     await scheduleDailySales(bindings, tick - 1800000)
     await scheduleDailySales(bindings, tick + 1800000)
     expect(create).not.toHaveBeenCalled()
-    const slots = [tick - 9 * 3600000, tick - 4 * 3600000, tick, tick + 7 * 3600000]
+    const slots = [tick - 9 * 3600000, tick - 4.5 * 3600000, tick, tick + 7 * 3600000]
     for (const time of slots) await scheduleDailySales(bindings, time + 34564)
     expect(create.mock.calls.map(([argument]) => argument)).toEqual(slots.map((time, index) => {
       const id = index === 2 ? 'daily-sales-auto-2026-11-13' : 'daily-sales-slot-' + time
@@ -69,7 +69,7 @@ it('uses one Beijing 16:00 start for all four windows and compares exactly 24 ho
   for (const [end, yesterdayEnd, includeDaily] of [
     ['2026-11-13T15:00:00.000Z', '2026-11-12T15:00:00.000Z', false],
     ['2026-11-13T23:00:00.000Z', '2026-11-12T23:00:00.000Z', false],
-    ['2026-11-14T04:00:00.000Z', '2026-11-13T04:00:00.000Z', false],
+    ['2026-11-14T03:30:00.000Z', '2026-11-13T03:30:00.000Z', false],
     ['2026-11-14T08:00:00.000Z', '2026-11-13T08:00:00.000Z', true],
   ] as const) {
     expect(slot(end)).toEqual({
@@ -78,6 +78,7 @@ it('uses one Beijing 16:00 start for all four windows and compares exactly 24 ho
     })
   }
   expect(slot('2026-11-14T00:00:00Z')).toBeNull()
+  expect(slot('2026-11-14T04:00:00Z')).toBeNull()
   expect(slot('2026-11-14T09:00:00Z')).toBeNull()
   expect(slot('2026-11-13T23:30:00Z')).toBeNull()
 })

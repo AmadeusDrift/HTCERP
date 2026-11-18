@@ -324,8 +324,8 @@ async function prepareInfringementMessage(
   return { asin, title, image, lookupErrors, row: { ...row, asin, title, image, name } }
 }
 
-function infringementOwnerName(sku: string, owner?: string | null) {
-  return /^HUJM/i.test(sku) ? '集美' : owner ?? '未匹配'
+function infringementTeam(sku: string) {
+  return /^HUJM/i.test(sku) ? '集美' : null
 }
 
 export async function previewInfringement(env: ConnectionBindings, sku: string) {
@@ -342,7 +342,7 @@ export async function previewInfringement(env: ConnectionBindings, sku: string) 
     ? await db.prepare("SELECT username FROM accounts WHERE id=? AND active=1 AND role IN ('admin','operator')")
       .bind(accountId).first<string>('username')
     : null
-  const name = infringementOwnerName(sku, owner)
+  const name = infringementTeam(sku) ?? owner ?? '未匹配'
   const { row: enriched, ...message } = await prepareInfringementMessage(row, row.seller, name, amazonForInfringement(env))
   return { sku, owner: name === '未匹配' ? null : name, ...message, content: infringementText(enriched, buildInspector(terms)) }
 }
@@ -355,12 +355,15 @@ export async function queueInfringements(env: ConnectionBindings & GroupNotifica
   ])
   if (!group?.enabled || !store) return
   const { seller } = store
-  const [rules, members, terms] = await Promise.all([
+  const [rules, members, terms, teamMentions] = await Promise.all([
     feedbackOwnerRules(db, seller),
     groupMembers(db, group.id),
     customTerms(db),
+    db.prepare('SELECT team,account_id FROM notification_infringement_team_mentions')
+      .all<{ team: string; account_id: string }>(),
   ])
   const owners = new Map(members.results.map((member) => [member.accountId, member.name]))
+  const mentionAccounts = new Map(teamMentions.results.map(({ team, account_id }) => [team, account_id]))
   const inspect = buildInspector(terms)
   const amazon = amazonForInfringement(env)
   const earliest = scanStart(env)
@@ -383,10 +386,12 @@ export async function queueInfringements(env: ConnectionBindings & GroupNotifica
     .all<InfringementRecord & { id: string }>()
   const byOwner = new Map<string, { row: InfringementRecord & { id: string }; name: string; accountId: string | null }[]>()
   for (const row of results) {
-    const accountId = row.assigned_owner ?? matchFeedbackOwner(row.sku, rules)?.account_id ?? null
+    const team = infringementTeam(row.sku)
+    const mentionAccount = team ? mentionAccounts.get(team) : undefined
+    const accountId = mentionAccount ?? row.assigned_owner ?? matchFeedbackOwner(row.sku, rules)?.account_id ?? null
     const owner = accountId ? owners.get(accountId) : null
-    const name = infringementOwnerName(row.sku, owner)
-    const key = JSON.stringify([row.observed_at, name, name === '集美' ? null : owner ? accountId : row.id])
+    const name = team ?? owner ?? '未匹配'
+    const key = JSON.stringify([row.observed_at, name, team ? null : owner ? accountId : row.id])
     const matches = byOwner.get(key) ?? []
     matches.push({ row, name, accountId })
     byOwner.set(key, matches)

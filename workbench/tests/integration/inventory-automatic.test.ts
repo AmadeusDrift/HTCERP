@@ -2,7 +2,9 @@ import { readFileSync } from 'node:fs'
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite'
 import { expect, it } from 'vitest'
 import * as automatic from '../../packages/inventory-sync/automatic'
-import { sourceConnection } from '../../packages/inventory-sync/source'
+import { inventorySourceCandidates, sourceConnection } from '../../packages/inventory-sync/source'
+import { launchInventoryPatrol } from '../../packages/inventory-sync/source-jobs'
+import { lowCostStockChanges, recordInventoryDelta } from '../../packages/inventory-sync/inventory-delta'
 
 const now = Date.parse('2026-11-16T12:00:00Z')
 const scope = JSON.stringify({
@@ -15,6 +17,12 @@ function fixture() {
   const sqlite = new DatabaseSync(':memory:')
   sqlite.exec('PRAGMA foreign_keys=ON')
   for (const file of [
+    '0008_accounts.sql',
+    '0027_weekly_feedback.sql',
+    '0028_feedback_assignments.sql',
+    '0031_group_notifications.sql',
+    '0034_weekly_feedback_owner_rules.sql',
+    '0037_daily_store_sales.sql',
     '0041_inventory_replenishment.sql',
     '0042_inventory_source.sql',
     '0043_inventory_devices.sql',
@@ -22,6 +30,8 @@ function fixture() {
     '0045_inventory_device_handoff.sql',
     '0046_inventory_automatic.sql',
     '0047_inventory_order_history.sql',
+    '0058_inventory_new_listing_pause.sql',
+    '0060_inventory_bulk_receive.sql',
   ])
     sqlite.exec(readFileSync('migrations/' + file, 'utf8'))
   sqlite.exec(
@@ -30,13 +40,23 @@ function fixture() {
   sqlite
     .prepare('INSERT INTO inventory_devices(id,token_hash,name,scope_json,paired_at) VALUES(?,?,?,?,?)')
     .run(device.id, 'b'.repeat(64), 'Automatic', scope, now)
+  let statements = 0
   function prepare(sql: string, values: SQLInputValue[] = []) {
     const s = sqlite.prepare(sql)
     return {
       bind: (...args: SQLInputValue[]) => prepare(sql, args),
-      first: () => s.get(...values) ?? null,
-      all: () => ({ results: s.all(...values) }),
-      run: () => ({ meta: s.run(...values) }),
+      first: () => {
+        statements++
+        return s.get(...values) ?? null
+      },
+      all: () => {
+        statements++
+        return { results: s.all(...values) }
+      },
+      run: () => {
+        statements++
+        return { meta: s.run(...values) }
+      },
     }
   }
   const DB = {
@@ -106,10 +126,69 @@ function fixture() {
       )
       .run(generation, at)
   }
-  return { sqlite, DB, env, service, archives, stocks, broken, seed }
+  return { sqlite, DB, env, service, archives, stocks, broken, seed, statementCount: () => statements }
 }
 it('exports the separate automatic service', () =>
   expect(automatic.InventoryAutomatic).toBeTypeOf('function'))
+it('adds newly sold and newly low-stock SKUs to the active queue without a new full snapshot', async () => {
+  const f = fixture()
+  await f.seed(2)
+  f.sqlite.exec("UPDATE inventory_source_rows SET sellable=5,listing_status='active'")
+  await f.service.configure('admin', { enabled: true, intervalMinutes: 60, newListingsEnabled: false }, now - 1)
+  await f.service.plan(now)
+  expect((await f.service.status()).counts?.candidates).toBe(0)
+  expect(await recordInventoryDelta(f.env, 'g1', 'SELLER', 'stock', now + 1, [
+    { sku: 'SKU-001-JIT', sellable: 2 }, { sku: 'UNSOLD-JIT', sellable: 0 },
+  ])).toBe(1)
+  expect(await recordInventoryDelta(f.env, 'g1', 'SELLER', 'orders', now + 1, [
+    { sku: 'RECENT-JIT', sellable: null },
+  ])).toBe(1)
+  expect((await f.service.claim(device, now + 2, { bulk: true })).job?.rows.map(r=>r.sku))
+    .toEqual(['RECENT-JIT', 'SKU-001-JIT'])
+  expect(await recordInventoryDelta(f.env, 'previous-generation', 'SELLER', 'orders', now + 3, [
+    { sku: 'IGNORE-JIT', sellable: null },
+  ])).toBe(0)
+  f.sqlite.close()
+})
+it('uses only unique and explicitly scoped Low-Cost Store available stock from Amazon deltas', () => {
+  const stock = (sellerSku: string, stores = ['Low-Cost Store'], updatedAt = now) => ({
+    sellerSku, stores, condition: 'NewItem', lastUpdatedTime: new Date(updatedAt).toISOString(),
+    inventoryDetails: { fulfillableQuantity: 0 },
+  })
+  expect(lowCostStockChanges([
+    stock('VALID-JIT'), stock('MAIN-JIT', ['US']), stock('MIXED-JIT', ['Low-Cost Store', 'US']),
+    stock('DUP-JIT'), stock('DUP-JIT'), stock('LATER-JIT', ['Low-Cost Store'], now + 1),
+  ], now)).toEqual([{ sku: 'VALID-JIT', sellable: 0 }])
+})
+it('uploads 2,900 ordered SKUs in a single file, records every row and retains the remainder', async () => {
+  const f = fixture()
+  await f.seed(2_901)
+  f.sqlite.exec("UPDATE inventory_source_rows SET sku=replace(sku,'-JIT','-J1T'),channel='J1T' WHERE sku='SKU-000-JIT'")
+  await f.service.configure('admin', { enabled: true, intervalMinutes: 60, newListingsEnabled: false }, now - 1)
+  while (!(await f.service.plan(now, 500)).complete) { /* Build all candidates. */ }
+  const job = (await f.service.claim(device, now + 1, { bulk: true })).job!
+  expect(job.rows).toHaveLength(2_900)
+  expect(job.rows.some(({ sku }) => sku.endsWith('J1T'))).toBe(true)
+  const command = { jobId: job.id, leaseId: job.leaseId }
+  let time = now + 2
+  let prepared = await f.service.prepare(device, command, time++)
+  expect(prepared).toMatchObject({ pending: true })
+  for (let page = 0; 'pending' in prepared && page < 160; page++)
+    prepared = await f.service.prepare(device, command, time++)
+  const { job: permitted } = prepared
+  expect(permitted.state).toBe('SUBMITTING')
+  expect(permitted.rows).toHaveLength(2_900)
+  expect(permitted).toHaveProperty('csv', expect.stringContaining('SKU-000-J1T'))
+  expect((await f.service.prepare(device, command, time++)).job).not.toHaveProperty('csv')
+  const result = { ...command, eventId: 'bulk-receipt', filename: permitted.filename,
+    sha256: permitted.sha256, warehouseCode: 'A1C5', status: 'COMPLETED', errorCount: 0,
+    evidence: { rowText: 'Completed None', observedAt: time } }
+  expect((await f.service.results(device, result, time++)).job.state).toBe('SUCCEEDED')
+  expect((await f.service.results(device, result, time++)).replay).toBe(true)
+  expect(f.sqlite.prepare("SELECT COUNT(*) AS n FROM inventory_replenishment_rows WHERE outcome='SUCCEEDED' AND file_row IS NOT NULL").get()).toMatchObject({ n: 2_900 })
+  expect((await f.service.claim(device, time, { bulk: true })).job?.rows).toHaveLength(1)
+  f.sqlite.close()
+}, 40_000)
 it('plans only ordered stock below five and new-only stock below two, preserving ordered priority', async () => {
   const f = fixture()
   await f.seed(8)
@@ -146,6 +225,132 @@ it('plans only ordered stock below five and new-only stock below two, preserving
     ['SKU-003-JIT', 1],
     ['SKU-007-JIT', 1],
   ])
+  f.sqlite.close()
+})
+it('uses ERP groups for new-listing targets at planning and fresh stock at preflight', async () => {
+  const f = fixture()
+  await f.seed(0)
+  f.sqlite.exec(`
+    INSERT INTO accounts(id,username,role,salt,password_hash) VALUES
+      ('ops-a','ops-a','operator','salt','hash'),('ops-c','ops-c','operator','salt','hash');
+    INSERT INTO daily_sales_team_members VALUES ('a','ops-a'),('c','ops-c');
+    INSERT INTO weekly_feedback_owner_rules VALUES
+      ('SELLER','ATVPDKIKX0DER','prefix','RULE-',1,'ops-a','ops-a');
+    INSERT INTO weekly_feedback_owners VALUES
+      ('SELLER','ATVPDKIKX0DER','RULE-C-JIT','ops-c','manual','ops-a','2026-11-16');
+    INSERT INTO daily_sales_sku_teams VALUES ('DIRECT-B-JIT','b'),('AT-TARGET-C-JIT','c');
+    INSERT INTO inventory_source_rows
+      (generation,sku,channel,sellable,listing_status,ordered,new_listing) VALUES
+      ('g1','RULE-A-JIT','JIT',3,'active',NULL,1),
+      ('g1','DIRECT-B-JIT','JIT',2,'active',NULL,1),
+      ('g1','RULE-C-JIT','JIT',1,'active',NULL,1),
+      ('g1','RULE-JIMEI-J1T','J1T',1,'active',NULL,1),
+      ('g1','AT-TARGET-C-JIT','JIT',2,'active',NULL,1),
+      ('g1','RULE-AT-TARGET-JIT','JIT',5,'active',NULL,1),
+      ('g1','RULE-UNSOLD-OLD-JIT','JIT',0,'active',NULL,0);
+  `)
+  f.stocks.set('RULE-A-JIT', 2)
+  f.stocks.set('DIRECT-B-JIT', 4)
+  f.stocks.set('RULE-C-JIT', 1)
+  f.stocks.set('RULE-JIMEI-J1T', 0)
+  await f.service.configure('admin', { enabled: true, intervalMinutes: 60 }, now - 1)
+  expect(await f.service.plan(now, 1)).toMatchObject({ complete: false, rows: 0 })
+  await f.service.plan(now)
+  expect((await f.service.status()).counts!.candidates).toBe(4)
+
+  const quantities = new Map<string, number>()
+  for (let i = 0; i < 2; i++) {
+    const at = now + 10 + i * 10
+    const claimed = (await f.service.claim(device, at)).job!
+    const keys = { jobId: claimed.id, leaseId: claimed.leaseId }
+    const { job } = await f.service.prepare(device, keys, at + 1)
+    for (const row of job.rows) quantities.set(row.sku, row.quantity)
+    await f.service.results(
+      device,
+      {
+        ...keys,
+        eventId: `receipt-${i}`,
+        filename: job.filename,
+        sha256: job.sha256,
+        warehouseCode: 'A1C5',
+        status: 'UNKNOWN',
+        errorCount: null,
+        evidence: { rowText: 'unknown receipt', observedAt: at + 2 },
+      },
+      at + 2,
+    )
+  }
+  expect(quantities).toEqual(
+    new Map([
+      ['RULE-A-JIT', 3],
+      ['DIRECT-B-JIT', 1],
+      ['RULE-C-JIT', 1],
+      ['RULE-JIMEI-J1T', 2],
+    ]),
+  )
+  const { rows } = await inventorySourceCandidates(f.DB)
+  expect(rows.filter((row) => row.candidateEligible).map((row) => [row.sku, row.candidateQuantity])).toEqual([
+    ['RULE-JIMEI-J1T', 1],
+    ['DIRECT-B-JIT', 3],
+    ['RULE-A-JIT', 2],
+    ['RULE-C-JIT', 1],
+  ])
+  f.sqlite.close()
+})
+it('rechecks operator groups before issuing a CSV when new SKUs change groups after planning', async () => {
+  const f = fixture()
+  await f.seed(0)
+  f.sqlite.exec(`
+    INSERT INTO daily_sales_sku_teams VALUES ('LOWER-JIT','a'),('RAISE-JIT','c');
+    INSERT INTO inventory_source_rows
+      (generation,sku,channel,sellable,listing_status,new_listing) VALUES
+      ('g1','LOWER-JIT','JIT',3,'active',1),
+      ('g1','RAISE-JIT','JIT',1,'active',1);
+  `)
+  f.stocks.set('LOWER-JIT', 3)
+  f.stocks.set('RAISE-JIT', 1)
+  await f.service.configure('admin', { enabled: true, intervalMinutes: 60 }, now - 1)
+  await f.service.plan(now)
+  const claimed = (await f.service.claim(device, now + 1)).job!
+  expect(claimed.rows.map(({ sku }) => sku)).toEqual(['LOWER-JIT', 'RAISE-JIT'])
+
+  f.sqlite.exec(`UPDATE daily_sales_sku_teams SET team=CASE sku WHEN 'LOWER-JIT' THEN 'c' ELSE 'b' END`)
+  const { job } = await f.service.prepare(device, { jobId: claimed.id, leaseId: claimed.leaseId }, now + 2)
+  expect(job.rows.map(({ sku, quantity }) => [sku, quantity])).toEqual([['RAISE-JIT', 4]])
+  expect(job.rowStates).toContainEqual({ sku: 'LOWER-JIT', outcome: 'SKIPPED', active: false })
+  f.sqlite.close()
+})
+it('keeps ordered replenishment active while excluding unsold new listings', async () => {
+  const f = fixture()
+  await f.seed(2)
+  f.sqlite.prepare(`UPDATE inventory_source_rows SET ordered=NULL,new_listing=1,sellable=1
+    WHERE sku='SKU-000-JIT'`).run()
+  f.stocks.set('SKU-000-JIT', 1)
+  await f.service.configure('admin', { enabled: true, intervalMinutes: 60, newListingsEnabled: false }, now - 1)
+  await f.service.plan(now)
+  expect(await f.service.status()).toMatchObject({ enabled: true, newListingsEnabled: false, counts: { candidates: 1 } })
+  const job = (await f.service.claim(device, now + 1)).job!
+  expect(job.rows.map(({ sku }) => sku)).toEqual(['SKU-001-JIT'])
+  const prepared = await f.service.prepare(device, { jobId: job.id, leaseId: job.leaseId }, now + 2)
+  expect(prepared.job.rows).toMatchObject([{ sku: 'SKU-001-JIT', quantity: 2 }])
+  f.sqlite.close()
+})
+it('rechecks a pause on unsold new listings after a mixed batch was claimed', async () => {
+  const f = fixture()
+  await f.seed(2)
+  f.sqlite.prepare(`UPDATE inventory_source_rows SET ordered=NULL,new_listing=1,sellable=1
+    WHERE sku='SKU-000-JIT'`).run()
+  f.stocks.set('SKU-000-JIT', 1)
+  await f.service.configure('admin', { enabled: true, intervalMinutes: 60 }, now - 1)
+  await f.service.plan(now)
+  const job = (await f.service.claim(device, now + 1)).job!
+  expect(job.rows).toHaveLength(2)
+  await f.service.configure('admin', { enabled: true, intervalMinutes: 60, newListingsEnabled: false }, now + 2)
+  expect(() => f.sqlite.prepare("UPDATE inventory_replenishment_jobs SET state='SUBMITTING' WHERE id=?").run(job.id))
+    .toThrow('AUTOMATIC_NEW_LISTINGS_PAUSED')
+  const prepared = await f.service.prepare(device, { jobId: job.id, leaseId: job.leaseId }, now + 3)
+  expect(prepared.job.rows.map(({ sku }) => sku)).toEqual(['SKU-001-JIT'])
+  expect(prepared.job.rowStates).toContainEqual({ sku: 'SKU-000-JIT', outcome: 'SKIPPED', active: false })
   f.sqlite.close()
 })
 it('starts disabled, pages a complete generation before claiming, serializes claims and issues one fresh CSV', async () => {
@@ -188,6 +393,39 @@ it('starts disabled, pages a complete generation before claiming, serializes cla
   expect(next.job!.rows).toHaveLength(2)
   f.sqlite.close()
 })
+
+it('stages over 100,000 candidates in one generation using bounded bulk writes and resumes before replacing it', async () => {
+  const f = fixture()
+  await f.seed(0)
+  f.sqlite.exec(`
+    WITH RECURSIVE seq(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM seq WHERE i<100005)
+    INSERT INTO inventory_source_rows(generation,sku,channel,sellable,listing_status,ordered)
+    SELECT 'g1',printf('LOAD-%06d-JIT',i),'JIT',3,'active',1 FROM seq;
+  `)
+  const later = now + 3600_000
+  const started: string[] = []
+  const RUNNER = {
+    create: async ({ id }: { id: string }) => {
+      started.push(id)
+      return { id }
+    },
+  } as unknown as Workflow
+  await f.service.configure('admin', { enabled: true, intervalMinutes: 60 }, now - 1)
+  const before = f.statementCount()
+  await f.service.plan(now, 500)
+  expect(f.statementCount() - before).toBeLessThan(100)
+  expect(await launchInventoryPatrol({ DB: f.DB, RUNNER }, later)).toBeNull()
+  expect((await f.service.claim(device, later)).job).toBeNull()
+
+  let result = { complete: false, rows: 0 }
+  for (let page = 1; page <= 200 && !result.complete; page++) result = await f.service.plan(later, 500)
+  expect(result).toMatchObject({ complete: true, rows: 5 })
+  expect((await f.service.status()).counts!.candidates).toBe(100005)
+  expect((await f.service.claim(device, later)).job?.rows).toHaveLength(10)
+  expect(await launchInventoryPatrol({ DB: f.DB, RUNNER }, later)).toMatch(/^inventory-patrol-/)
+  expect(started).toHaveLength(1)
+  f.sqlite.close()
+}, 60000)
 it('isolates failed API reads and disables a pending permit', async () => {
   const f = fixture()
   await f.seed(2)

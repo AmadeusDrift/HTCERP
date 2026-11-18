@@ -13,6 +13,7 @@ function fixture() {
     '0045_inventory_device_handoff.sql',
     '0046_inventory_automatic.sql',
     '0047_inventory_order_history.sql',
+    '0058_inventory_new_listing_pause.sql',
   ])
     sqlite.exec(readFileSync('migrations/' + migration, 'utf8'))
   sqlite.exec(

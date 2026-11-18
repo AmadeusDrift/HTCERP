@@ -1,11 +1,12 @@
 import { Hono } from 'hono'
 import type { AppEnv } from '../../apps/api/src/bindings'
 import { OrderSorting } from './service'
-import { packOrdersRoutes } from './pack-routes'
+import { packOrdersRoutes, streamPackLabelResult } from './pack-routes'
 import { PickingSheets, pickingResponse } from './picking-service'
 import { inventoryDeviceScope, connectionDigest } from '../inventory-sync/connection'
 import { pickingFilename } from './picking-workbook'
 import { PublicError } from '../contracts/errors'
+import { ManualFactory } from './manual-factory'
 
 export const orderSortingRoutes = new Hono<AppEnv>()
 orderSortingRoutes.route('/pack', packOrdersRoutes)
@@ -40,6 +41,24 @@ orderSortingRoutes.post('/run', async (c) =>
 )
 orderSortingRoutes.get('/runs/:id', async (c) =>
   c.json(await new OrderSorting(c.env).getRun(c.req.param('id'))),
+)
+orderSortingRoutes.get('/runs/:id/files', async (c) =>
+  c.json(await new ManualFactory(c.env).status(c.req.param('id'))),
+)
+orderSortingRoutes.post('/runs/:id/files/:group', async (c) =>
+  streamPackLabelResult(await new ManualFactory(c.env).prepareGroup(c.req.param('id'), c.req.param('group'))),
+)
+orderSortingRoutes.post('/runs/:id/group-picking/:group', async (c) =>
+  streamPackLabelResult(await new ManualFactory(c.env).prepareGroup(c.req.param('id'), c.req.param('group'), 'picking')),
+)
+orderSortingRoutes.post('/runs/:id/group-labels/:group', async (c) =>
+  streamPackLabelResult(await new ManualFactory(c.env).prepareGroup(c.req.param('id'), c.req.param('group'), 'labels')),
+)
+orderSortingRoutes.get('/runs/:id/group-picking/:group', async (c) =>
+  new ManualFactory(c.env).groupFile(c.req.param('id'), c.req.param('group'), 'picking'),
+)
+orderSortingRoutes.get('/runs/:id/group-labels/:group', async (c) =>
+  new ManualFactory(c.env).groupFile(c.req.param('id'), c.req.param('group'), 'labels'),
 )
 orderSortingRoutes.get('/assets/:key', async (c) => {
   const asset = await new OrderSorting(c.env).asset(c.req.param('key'))

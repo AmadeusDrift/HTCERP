@@ -21,7 +21,8 @@ import { launchPerformanceSync, performanceSyncWorkflow } from '../../../package
 import { schedulePartnerSales } from '../../../packages/partner-api/scheduled'
 import { InventoryAutomatic } from '../../../packages/inventory-sync/automatic'
 import { inventoryOrderHistoryWorkflow,launchInventoryOrderHistory } from '../../../packages/inventory-sync/order-history'
-import { inventoryPatrolWorkflow, scheduleInventoryPatrol } from '../../../packages/inventory-sync/source-jobs'
+import { inventoryPatrolWorkflow, scheduleInventoryPatrol, seedInventoryAutomatic } from '../../../packages/inventory-sync/source-jobs'
+import { assessInventoryDelta, hasFreshInventoryDeltas, inventoryDeltaWorkflow, scheduleInventoryDelta } from '../../../packages/inventory-sync/inventory-delta'
 import { lastSalesDay } from '../../../packages/store-sales/daily'
 import { auditWorkflow, launchAudit } from '../../../packages/title-audit/jobs'
 import { probeWeeklyReviewCounts, scheduleWeeklyFeedback, weeklyFeedbackWorkflow } from '../../../packages/weekly-feedback/jobs'
@@ -47,6 +48,9 @@ type WorkflowInput = {
 export class ResearchWorkflow extends WorkflowEntrypoint<OpsBindings, WorkflowInput> {
   async run(event: WorkflowEvent<WorkflowInput>, step: WorkflowStep) {
     const id = event.payload.runId
+    if (id.startsWith('inventory-delta-assess-')) return assessInventoryDelta(this.env, step)
+    if (id.startsWith('inventory-delta-')) return inventoryDeltaWorkflow(this.env, id, step)
+    if (id.startsWith('inventory-plan-')) return seedInventoryAutomatic(this.env, id.slice('inventory-plan-'.length), step)
     if (id.startsWith('performance-sync-')) return performanceSyncWorkflow(this.env, step, id)
     if (id.startsWith('inventory-history-')) return inventoryOrderHistoryWorkflow(this.env,id,step)
     if (id.startsWith('inventory-patrol-')) return inventoryPatrolWorkflow(this.env, id, step)
@@ -228,11 +232,13 @@ export class ResearchWorkflow extends WorkflowEntrypoint<OpsBindings, WorkflowIn
 export default {
   async scheduled(event: ScheduledController, env: OpsBindings) {
     if (event.cron === '*/5 * * * *') {
-      await scheduleInventoryPatrol(env, event.scheduledTime)
+      await scheduleInventoryPatrol(env, event.scheduledTime,
+        await hasFreshInventoryDeltas(env, event.scheduledTime) ? 1440 : 0)
       const automatic=new InventoryAutomatic(env)
       await automatic.plan(event.scheduledTime,500)
       await automatic.prune()
       await automatic.reconcile(event.scheduledTime)
+      await scheduleInventoryDelta(env, event.scheduledTime)
       const automaticSettings=await env.DB.prepare('SELECT enabled FROM inventory_automatic_settings WHERE singleton=1').first<{enabled:number}>()
       await launchInventoryOrderHistory(env,automaticSettings?.enabled===1,event.scheduledTime)
       return

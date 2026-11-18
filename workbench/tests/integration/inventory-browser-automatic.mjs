@@ -183,9 +183,17 @@ export async function browserAutomatic({ api, db, admin, stocks }) {
     const restarted = await launch(),
       page = await restarted.context.newPage()
     await page.goto('https://sellerflex.amazon.com/receive')
-    const deadline = Date.now() + 90000
-    while (uploads.length < 3 && Date.now() < deadline) await delay(250)
-    assert.equal(uploads.length, 3, 'restarted automatic worker must progress across batches')
+    const deadline = Date.now() + 30000
+    let acknowledged = false
+    while (!acknowledged && Date.now() < deadline) {
+      acknowledged = await restarted.worker.evaluate(async () => {
+        const s = (await chrome.storage.local.get('sf-erp-v2'))['sf-erp-v2']
+        return !s.live?.pending && s.live?.stage === 'ACKNOWLEDGED'
+      })
+      if (!acknowledged) await delay(250)
+    }
+    assert.ok(acknowledged, 'restarted automatic worker must recover the stored receipt')
+    assert.equal(uploads.length, 1, 'a recovered bulk receipt cannot cause another upload')
     await page.waitForFunction(
       () => document.querySelector('input[type=file]').files.length === 0,
       null,
@@ -198,18 +206,17 @@ export async function browserAutomatic({ api, db, admin, stocks }) {
           .trim()
           .split(/\r?\n/).length - 1,
     )
-    assert.deepEqual(rowCounts, [10, 10, 2])
-    assert.equal(new Set(uploads.map((file) => file.name)).size, 3)
+    assert.deepEqual(rowCounts, [22])
     await admin('/automatic/settings', { enabled: false, intervalMinutes: 60 })
     return {
       passed: true,
       realAmazonWrites: 0,
-      uploadedFiles: 3,
+      uploadedFiles: 1,
       rows: 22,
       batches: rowCounts,
       skippedCurrentGeneration: true,
       lostAcknowledgementRestart: true,
-      unknownDidNotBlockOtherSkus: true,
+      unknownDidNotReissue: true,
       ownInputCleared: true,
     }
   } finally {

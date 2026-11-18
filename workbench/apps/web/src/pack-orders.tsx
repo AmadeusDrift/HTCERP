@@ -1,8 +1,8 @@
 import { Download, RefreshCw } from 'lucide-react'
-import { useEffect, useState } from 'react'
+import { Fragment, useEffect, useState } from 'react'
 import type { PackBatch } from '../../../packages/order-sorting/pack-types'
-import type { FactoryPackage } from '../../../packages/order-sorting/pack-factory'
-import { ErrorBox, Loading, Notice, Panel, request, useData, useLocation } from './ui'
+import type { PackFactoryPackages, FactoryPackage } from '../../../packages/order-sorting/pack-factory'
+import { ErrorBox, Loading, Panel, request, useData, useLocation } from './ui'
 
 const names = {
   READY: '分拣、带图备货单与标签已完成',
@@ -41,11 +41,38 @@ export function PackOrdersPanel() {
   const [older, setOlder] = useState<PackBatch[]>([]),
     [next, setNext] = useState<Page['next']>(null)
   const [factory, setFactory] = useState<FactoryPackage | null>(null)
+  const [all, setAll] = useState(false)
+  const [preview, setPreview] = useState<Awaited<ReturnType<PackFactoryPackages['preview']>> | null>(
+    null,
+  )
+  const [previewError, setPreviewError] = useState('')
+  const [expanded, setExpanded] = useState('')
+  useEffect(() => {
+    let active = true
+    setPreview(null)
+    setPreviewError('')
+    if (batch && !batch.conflicts.length) {
+      request<Awaited<ReturnType<PackFactoryPackages['preview']>>>(
+        `/order-sorting/pack/${batch.id}/factory-preview`,
+      )
+        .then((value) => {
+          if (active) setPreview(value)
+        })
+        .catch((reason) => {
+          if (active) setPreviewError(reason.message || '读取全部订单失败')
+        })
+    }
+    return () => {
+      active = false
+    }
+  }, [batch])
   useEffect(() => {
     setOlder([])
     setNext(listing.data?.next ?? null)
   }, [listing.data])
   useEffect(() => {
+    setAll(false)
+    setExpanded('')
     if (!selected) return
     setBatch(null)
     setFactory(null)
@@ -100,32 +127,67 @@ export function PackOrdersPanel() {
             await file('assets/' + batch.templateKey),
             await file(`pack/${batch.id}/source`),
             readLabel,
-            group => file(`pack/${batch.id}/group-picking/${encodeURIComponent(group)}`),
+            (group) => file(`pack/${batch.id}/group-picking/${encodeURIComponent(group)}`),
           ),
           `Pack-${batch.date}-${batch.id.slice(0, 8)}.zip`,
           'application/zip',
         )
     })
   }
-  async function factoryOutput() {
-    if (!batch) return
-    const id = batch.id
-    await act('正在合并本次全部订单的分拣表、标签和带图备货单', async () => {
-      const result = await request<FactoryPackage>(`/order-sorting/pack/${id}/factory-package`, {})
-      save(await file(`pack/${id}/factory-package/${result.key}`), result.filename, 'application/zip')
+  async function factoryFile(groupFile?: string) {
+    if (!batch || !preview) return
+    const result = await request<FactoryPackage>(`/order-sorting/pack/${batch.id}/factory-package`, {})
+    if (result.attributeRevision !== preview.revision)
+      throw Error('属性清单已更新，请刷新本批次后重新核对。')
+    const bytes = await file(`pack/${batch.id}/factory-package/${result.key}`)
+    if (groupFile) {
+      const { default: JSZip } = await import('jszip')
+      const entry = (await JSZip.loadAsync(bytes)).file(groupFile)
+      if (!entry) throw Error('工厂包缺少所选分组文件。')
+      save(
+        await entry.async('uint8array'),
+        groupFile.split('/').pop()!,
+        groupFile.endsWith('.pdf') ? 'application/pdf' : sheetType,
+      )
+    } else {
+      save(bytes, result.filename, 'application/zip')
       setFactory(result)
+    }
+  }
+  const sheetType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+  const groups = (all ? preview?.groups : batch?.plan?.groups) ?? []
+  const units = groups.reduce((sum, group) => sum + group.units, 0)
+  const count = groups.reduce((sum, group) => sum + group.raw.length, 0)
+  async function groupFile(name: string, kind: '分拣表' | 'SKU标签' | '带图备货单') {
+    if (!batch) return
+    const group = groups.find((item) => item.name === name)!
+    const filename =
+      kind === '分拣表'
+        ? group.filename
+        : group.filename.replace(/\.xlsx$/i, kind === 'SKU标签' ? '.pdf' : '-带图备货单.xlsx')
+    if (all) return act('正在读取分组文件', () => factoryFile(kind + '/' + filename))
+    if (kind === 'SKU标签') return output(name)
+    await act('正在读取分组文件', async () => {
+      if (kind === '带图备货单') {
+        save(
+          await file(`pack/${batch.id}/group-picking/${encodeURIComponent(name)}`),
+          filename,
+          sheetType,
+        )
+      } else {
+        const { exportGroup } = await import('../../../packages/order-sorting/workbook')
+        const original = batch.plan!.groups.find((item) => item.name === name)!
+        save(
+          await exportGroup(await file('assets/' + batch.templateKey), original, batch.date),
+          filename,
+          sheetType,
+        )
+      }
     })
   }
   return (
     <div className="stack">
       <ErrorBox error={error || listing.error} />
-      <Notice>
-        在 SellerFlex Pack 选择订单并打开 Order List，点击插件“同步到 ERP
-        并分拣”。重复项自动跳过，数量变化项单列待核对。默认导出新增订单；需要把本次全部订单一起交厂，可选择“导出本次全部订单工厂包”。{' '}
-        <a href="/downloads/SellerFlex-Batch-Inventory-v0.7.1.zip" download>
-          下载插件 v0.7.1
-        </a>
-      </Notice>
       {busy && (
         <p aria-live="polite" className="muted">
           {busy}…
@@ -133,176 +195,31 @@ export function PackOrdersPanel() {
       )}
       {batch && (
         <Panel
-          title="Pack 自动分拣批次"
+          title={batch.date + ' 订单'}
           extra={
             <button
               type="button"
               className="secondary"
               disabled={!!busy}
-              onClick={() => void refreshBatch()}
+              onClick={() => {
+                setSelected(null)
+                setBatch(null)
+              }}
             >
-              <RefreshCw size={15} />
-              刷新本批次
+              切换批次
             </button>
           }
         >
           <div className="panel-body stack">
             <div className="sorting-toolbar">
-              <p>
-                <strong>{batch.filename}</strong>
-                <small className="sorting-filename">
-                  {batch.date} · 批次 {batch.id.slice(0, 8)}
-                </small>
-              </p>
-              <strong>{names[batch.state]}</strong>
-            </div>
-            <div className="sorting-stats">
-              <div>
-                <small>原始记录</small>
-                <strong>{batch.totalRows}</strong>
-              </div>
-              <div>
-                <small>新增分拣</small>
-                <strong>{batch.newRows}</strong>
-              </div>
-              <div>
-                <small>重复跳过</small>
-                <strong>{batch.skippedRows}</strong>
-              </div>
-              <div>
-                <small>数量待核对</small>
-                <strong>{batch.conflicts.length}</strong>
-              </div>
-            </div>
-            <p className="muted">
-              API 标签已生成 {batch.labelGroups?.filter((x) => x.ready).length ?? 0} /{' '}
-              {batch.plan?.groups.length ?? 0} 组。 原版 SKU 标签和合成文件保存在
-              ERP，后续直接复用；固定欧代标在上、SKU 条码在下，每件一页 80×80 mm。
-            </p>
-            {batch.labelError && <p role="alert">{batch.labelError}</p>}
-            <p className="muted">带图备货单已生成 {batch.pickingGroups?.filter(x => x.ready).length ?? 0} / {batch.plan?.groups.length ?? 0} 组。商品展示主图首次从 Amazon API 获取，图片和备货单保存在 ERP，换电脑直接复用。</p>
-            {batch.pickingError && <p role="alert">{batch.pickingError}</p>}
-            <div className="actions">
-              {batch.state === 'LABELS_PENDING' && (
-                <button
-                  type="button"
-                  disabled={!!busy}
-                  onClick={() =>
-                    void act('正在生成主图、备货单和 API 标签', async () => {
-                      setBatch(
-                        await request<PackBatch>(`/order-sorting/pack/${batch.id}/prepare-labels`, {
-                          method: 'POST',
-                        }),
-                      )
-                      await listing.refetch()
-                    })
-                  }
-                >
-                  生成／重试备货单和标签
-                </button>
-              )}
-
-              <button
-                type="button"
-                disabled={!!busy || batch.state !== 'READY'}
-                onClick={() => void output()}
-              >
-                <Download size={16} />
-                下载新增订单分拣包
-              </button>
-              <button
-                type="button"
-                disabled={!!busy || batch.conflicts.length > 0}
-                onClick={() => void factoryOutput()}
-              >
-                <Download size={16} />
-                导出本次全部订单工厂包
-              </button>
-              <button
-                type="button"
-                className="secondary"
-                disabled={!!busy}
-                onClick={() =>
-                  void act('正在读取原始订单', async () =>
-                    save(
-                      await file(`pack/${batch.id}/source`),
-                      batch.filename,
-                      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                    ),
-                  )
-                }
-              >
-                下载原始订单
+              <span className="muted">
+                批次 {batch.id.slice(0, 8)} · {names[batch.state]}
+              </span>
+              <button className="secondary" disabled={!!busy} onClick={() => void refreshBatch()}>
+                <RefreshCw size={14} />
+                刷新本批次
               </button>
             </div>
-            <p className="muted">全部订单工厂包包含本次新增及重复跳过的订单，按当前产品属性清单统一分组，复用 ERP 图片和标签缓存；仅合并导出，不重复入账。数量待核对时暂不能导出全部工厂包。</p>
-            {factory?.batchId === batch.id && <p role="status">已导出全部订单工厂包：{factory.orderCount} 个订单 · {factory.rowCount} 条明细 · {factory.units} 件 · {factory.groups.length} 组，包含分拣表、SKU 标签和带图备货单。</p>}
-            {batch.plan && (
-              <div className="table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>分组</th>
-                      <th>新增记录 / 件数</th>
-                      <th>分拣表</th>
-                      <th>带图备货单</th>
-                      <th>官方 SKU 标签</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {batch.plan.groups.map((group) => (
-                      <tr key={group.name}>
-                        <td>{group.name}</td>
-                        <td>
-                          {group.raw.length} / {group.units}
-                        </td>
-                        <td>
-                          <button
-                            type="button"
-                            className="secondary"
-                            disabled={!!busy}
-                            onClick={() =>
-                              void act('正在生成分拣表', async () => {
-                                const io = await import('../../../packages/order-sorting/workbook')
-                                save(
-                                  await io.exportGroup(
-                                    await file('assets/' + batch.templateKey),
-                                    group,
-                                    batch.date,
-                                  ),
-                                  group.filename,
-                                  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                                )
-                              })
-                            }
-                          >
-                            下载 {group.filename}
-                          </button>
-                        </td>
-                        <td>
-                          <button type="button" className="secondary" disabled={!!busy} onClick={() => void act('正在读取带图备货单', async () => {
-                            save(await file(`pack/${batch.id}/group-picking/${encodeURIComponent(group.name)}`), group.filename.replace(/\.xlsx$/i, '-带图备货单.xlsx'), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-                            setBatch(await request<PackBatch>('/order-sorting/pack/' + batch.id))
-                          })}>下载带图备货单</button>
-                        </td>
-                        <td>
-                          <button
-                            type="button"
-                            className="secondary"
-                            disabled={
-                              !!busy || !batch.labelGroups?.find((x) => x.group === group.name)?.ready
-                            }
-                            onClick={() => void output(group.name)}
-                          >
-                            下载 {group.name} 标签 PDF
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
             {!!batch.conflicts.length && (
               <>
                 <h3>数量变化，待核对</h3>
@@ -333,89 +250,296 @@ export function PackOrdersPanel() {
                 </div>
               </>
             )}
+            <fieldset className="pack-scope">
+              <legend>交厂范围</legend>
+              <label>
+                <input
+                  type="radio"
+                  name="pack-scope"
+                  checked={!all}
+                  disabled={!!busy}
+                  onChange={() => {
+                    setAll(false)
+                    setExpanded('')
+                  }}
+                />
+                <span>
+                  <strong>仅本次新增</strong>
+                  <small>
+                    {batch.newRows} 条 / {batch.plan?.totalUnits ?? 0} 件
+                  </small>
+                </span>
+              </label>
+              <label>
+                <input
+                  type="radio"
+                  name="pack-scope"
+                  checked={all}
+                  disabled={!!busy || !!batch.conflicts.length}
+                  onChange={() => {
+                    setAll(true)
+                    setExpanded('')
+                  }}
+                />
+                <span>
+                  <strong>本次全部</strong>
+                  <small>
+                    {preview
+                      ? preview.orderCount +
+                        ' 单 / ' +
+                        preview.groups.reduce((sum, g) => sum + g.units, 0) +
+                        ' 件 · '
+                      : ''}
+                    含已分拣的 {batch.skippedRows} 条
+                  </small>
+                </span>
+              </label>
+            </fieldset>
+            {all && !preview && <p role="status">{previewError || '正在读取全部订单…'}</p>}
+            {(!all || preview) && (
+              <>
+                <h3>
+                  备货分组{' '}
+                  <small className="muted">
+                    {all ? '本次全部' : '仅本次新增'} · {groups.length} 组
+                  </small>
+                </h3>
+                {groups.length ? (
+                  <div className="table-wrap">
+                    <table className="pack-group-table">
+                      <thead>
+                        <tr>
+                          <th>分组</th>
+                          <th>订单明细</th>
+                          <th>备货件数</th>
+                          <th>分组文件</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {groups.map((g) => (
+                          <Fragment key={g.name}>
+                            <tr>
+                              <td>
+                                <button
+                                  className="pack-group-toggle"
+                                  aria-expanded={expanded === g.name}
+                                  onClick={() => setExpanded(expanded === g.name ? '' : g.name)}
+                                >
+                                  {expanded === g.name ? '▾' : '▸'}　{g.name}
+                                </button>
+                              </td>
+                              <td>{g.raw.length} 条</td>
+                              <td>
+                                <strong>{g.units} 件</strong>
+                              </td>
+                              <td>
+                                <details>
+                                  <summary>下载文件</summary>
+                                  {(['分拣表', '带图备货单', 'SKU标签'] as const).map((kind) => (
+                                    <button
+                                      key={kind}
+                                      className="secondary"
+                                      disabled={
+                                        !!busy ||
+                                        (!all &&
+                                          kind === 'SKU标签' &&
+                                          !batch.labelGroups?.find((item) => item.group === g.name)
+                                            ?.ready)
+                                      }
+                                      onClick={() => void groupFile(g.name, kind)}
+                                    >
+                                      {kind}
+                                    </button>
+                                  ))}
+                                </details>
+                              </td>
+                            </tr>
+                            {expanded === g.name && (
+                              <tr>
+                                <td colSpan={4}>
+                                  <table aria-label={g.name + ' 明细'}>
+                                    <thead>
+                                      <tr>
+                                        <th>SKU</th>
+                                        <th>FNSKU</th>
+                                        <th>件数</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {g.raw.map((r, i) => (
+                                        <tr key={i}>
+                                          <td>{r[1]}</td>
+                                          <td>{r[2]}</td>
+                                          <td>{r[4]}</td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                </td>
+                              </tr>
+                            )}
+                          </Fragment>
+                        ))}
+                      </tbody>
+                      <tfoot>
+                        <tr>
+                          <th>合计</th>
+                          <td>{count} 条</td>
+                          <td>
+                            <strong>{units} 件</strong>
+                          </td>
+                          <td />
+                        </tr>
+                      </tfoot>
+                    </table>
+                  </div>
+                ) : (
+                  <p className="muted">本批没有新增备货明细。</p>
+                )}
+                <div className="sorting-toolbar pack-export">
+                  <div>
+                    <strong>工厂包内容</strong>
+                    <small className="sorting-filename">分拣表、SKU 标签和带图备货单</small>
+                  </div>
+                  {!all && batch.state === 'LABELS_PENDING' ? (
+                    <button
+                      disabled={!!busy}
+                      onClick={() =>
+                        void act('正在生成备货单和标签', async () => {
+                          setBatch(
+                            await request<PackBatch>(
+                              `/order-sorting/pack/${batch.id}/prepare-labels`,
+                              {},
+                            ),
+                          )
+                          await listing.refetch()
+                        })
+                      }
+                    >
+                      生成／重试备货单和标签
+                    </button>
+                  ) : (
+                    <button
+                      disabled={!!busy || !count || (!all && batch.state !== 'READY')}
+                      onClick={() =>
+                        all ? void act('正在整理全部订单工厂包', () => factoryFile()) : void output()
+                      }
+                    >
+                      <Download size={16} />
+                      {all ? '下载全部订单工厂包' : '下载新增订单工厂包'} · {units} 件
+                    </button>
+                  )}
+                </div>
+              </>
+            )}
+            {!all && (batch.labelError || batch.pickingError) && (
+              <p role="alert">{[batch.labelError, batch.pickingError].filter(Boolean).join(' · ')}</p>
+            )}
+            {all && factory?.batchId === batch.id && (
+              <p role="status">
+                已导出全部订单工厂包：{factory.orderCount} 个订单 · {factory.units} 件
+              </p>
+            )}
+            <details>
+              <summary>原始订单文件</summary>
+              <button
+                className="secondary"
+                disabled={!!busy}
+                onClick={() =>
+                  void act('正在读取原始订单', async () =>
+                    save(await file(`pack/${batch.id}/source`), batch.filename, sheetType),
+                  )
+                }
+              >
+                下载原始订单
+              </button>
+            </details>
           </div>
         </Panel>
       )}
-      <Panel
-        title="Pack 导入记录"
-        extra={
-          <button
-            type="button"
-            className="secondary"
-            disabled={!!busy}
-            onClick={() => void listing.refetch()}
-          >
-            刷新记录
-          </button>
-        }
-      >
-        <div className="panel-body">
-          {listing.isLoading ? (
-            <Loading />
-          ) : !listing.data?.batches.length ? (
-            <p className="muted">尚无 Pack 自动导入批次。</p>
-          ) : (
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>订单日期 / 批次</th>
-                    <th>新增 / 跳过 / 待核对</th>
-                    <th>状态</th>
-                    <th>操作</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {[...listing.data.batches, ...older].map((item) => (
-                    <tr key={item.id}>
-                      <td>
-                        {item.date}
-                        <small className="sorting-filename">{item.id.slice(0, 8)}</small>
-                      </td>
-                      <td>
-                        {item.newRows} / {item.skippedRows} / {item.conflicts.length}
-                      </td>
-                      <td>{names[item.state]}</td>
-                      <td>
-                        <button
-                          type="button"
-                          className="secondary"
-                          disabled={!!busy}
-                          onClick={() => {
-                            setSelected(item.id)
-                            setBatch(item)
-                            setError(null)
-                          }}
-                        >
-                          查看批次
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-          {next && (
+      {selected && !batch && !error && <Loading />}
+      {!batch && (
+        <Panel
+          title="Pack 导入记录"
+          extra={
             <button
               type="button"
               className="secondary"
               disabled={!!busy}
-              onClick={() =>
-                void act('正在读取历史批次', async () => {
-                  const more = await request<Page>(
-                    `/order-sorting/pack/batches?time=${next.time}&id=${encodeURIComponent(next.id)}`,
-                  )
-                  setOlder([...older, ...more.batches])
-                  setNext(more.next)
-                })
-              }
+              onClick={() => void listing.refetch()}
             >
-              加载更早批次
+              刷新记录
             </button>
-          )}
-        </div>
-      </Panel>
+          }
+        >
+          <div className="panel-body">
+            {listing.isLoading ? (
+              <Loading />
+            ) : !listing.data?.batches.length ? (
+              <p className="muted">尚无 Pack 自动导入批次。</p>
+            ) : (
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>订单日期 / 批次</th>
+                      <th>新增 / 跳过 / 待核对</th>
+                      <th>状态</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {[...listing.data.batches, ...older].map((item) => (
+                      <tr key={item.id}>
+                        <td>
+                          {item.date}
+                          <small className="sorting-filename">{item.id.slice(0, 8)}</small>
+                        </td>
+                        <td>
+                          {item.newRows} / {item.skippedRows} / {item.conflicts.length}
+                        </td>
+                        <td>{names[item.state]}</td>
+                        <td>
+                          <button
+                            type="button"
+                            className="secondary"
+                            disabled={!!busy}
+                            onClick={() => {
+                              setSelected(item.id)
+                              setBatch(item)
+                              setError(null)
+                            }}
+                          >
+                            查看批次
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {next && (
+              <button
+                type="button"
+                className="secondary"
+                disabled={!!busy}
+                onClick={() =>
+                  void act('正在读取历史批次', async () => {
+                    const more = await request<Page>(
+                      `/order-sorting/pack/batches?time=${next.time}&id=${encodeURIComponent(next.id)}`,
+                    )
+                    setOlder([...older, ...more.batches])
+                    setNext(more.next)
+                  })
+                }
+              >
+                加载更早批次
+              </button>
+            )}
+          </div>
+        </Panel>
+      )}
     </div>
   )
 }

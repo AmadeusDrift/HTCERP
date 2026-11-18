@@ -9,6 +9,7 @@ const InventoryFiles = (() => {
     "SOURCE_INVENTORY_TYPE", "DESTINATION_INVENTORY_TYPE", "QUANTITY"
   ];
   const maxXml = 32 * 1024 * 1024;
+  const maxReceiveRows = 3000;
 
   function parseCsv(text) {
     const rows = [];
@@ -158,6 +159,7 @@ const InventoryFiles = (() => {
   const positiveInteger = value => /^\d+$/.test(value) && Number.isSafeInteger(Number(value)) && Number(value) > 0;
   const matchesHeader = (cells, headers) => headers.every((header, index) => cells[index]?.trim() === header)
     && !cells.slice(headers.length).some(meaningful);
+  const hasRecord = row => row.values.some(meaningful) || row.formulas.length > 0;
 
   function checkRows(rows, mode) {
     const isReceive = mode === "receive";
@@ -173,7 +175,7 @@ const InventoryFiles = (() => {
       return {rows: 0, errors, issueCount};
     }
     const body = rows.slice(1);
-    const records = body.filter(row => row.values.some(meaningful) || row.formulas.length > 0);
+    const records = body.filter(hasRecord);
     const highestRow = body.reduce((max, row) => Math.max(max, row.number), 1);
     const blankCount = highestRow - 1 - records.length;
     const spacedActions = [];
@@ -211,6 +213,31 @@ const InventoryFiles = (() => {
     return {rows: records.length, errors, issueCount};
   }
 
+  async function sha256(buffer) {
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", buffer));
+    return Array.from(digest, byte => byte.toString(16).padStart(2, "0")).join("");
+  }
+
+  async function splitReceive(file, rows, hash) {
+    const records = rows.slice(1).filter(hasRecord);
+    const csvLine = ({values}) => values.map(value => /[",\r\n]/.test(value)
+      ? '"' + value.replace(/"/g, '""') + '"' : value).join(",");
+    const header = csvLine(rows[0]);
+    const stem = file.name.slice(0, -4).slice(0, 80);
+    const total = Math.ceil(records.length / maxReceiveRows);
+    const parts = [];
+    for (let offset = 0; offset < records.length; offset += maxReceiveRows) {
+      const index = parts.length + 1;
+      const batch = records.slice(offset, offset + maxReceiveRows);
+      const csv = [header, ...batch.map(csvLine), ""].join("\r\n");
+      const part = new File([csv], `${stem}--${index}-of-${total}.csv`, {type: "text/csv"});
+      // Distinguish identical chunks within one upload while keeping part identities stable on replay.
+      const partHash = await sha256(new TextEncoder().encode(`${hash}:${index}`));
+      parts.push({file: part, rows: batch.length, hash: partHash});
+    }
+    return parts;
+  }
+
   async function inspect(file, mode) {
     const suffix = mode === "receive" ? ".csv" : ".xlsx";
     if (!file.name.toLowerCase().endsWith(suffix)) throw new Error("当前入口只接受 " + suffix + " 文件。");
@@ -220,8 +247,10 @@ const InventoryFiles = (() => {
         .map((values, index) => ({number: index + 1, values, formulas: []}))
       : await readAdjustment(buffer);
     const result = checkRows(rows, mode);
-    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", buffer));
-    const hash = Array.from(digest, byte => byte.toString(16).padStart(2, "0")).join("");
+    const hash = await sha256(buffer);
+    if (mode === "receive" && !result.issueCount && result.rows > maxReceiveRows) {
+      return {...result, hash, parts: await splitReceive(file, rows, hash)};
+    }
     return {...result, hash};
   }
   return {inspect};

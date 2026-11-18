@@ -62,7 +62,7 @@ export class PackFactoryPackages {
       throw new PublicError('FORBIDDEN', '本批次不属于当前 Amazon 店铺。', 403)
     return { scope, record }
   }
-  async prepare(id: string): Promise<FactoryPackage> {
+  private async readPlan(id: string) {
     const { scope, record } = await this.scope(id),
       orders = new PackOrders(this.env)
     const batch = await orders.view(id)
@@ -101,6 +101,18 @@ export class PackFactoryPackages {
       throw new PublicError('INVALID_INPUT', '产品属性分类存在冲突，请检查属性清单。', 400)
     }
     for (const group of plan.groups) checkPackLabelQuantity(group)
+    return { batch, record, rows, source, config, plan }
+  }
+  async preview(id: string) {
+    const { rows, config, plan } = await this.readPlan(id)
+    return {
+      orderCount: new Set(rows.map(row => row[3])).size,
+      revision: config.revision,
+      groups: plan.groups.map(({ name, filename, raw, units }) => ({ name, filename, raw, units })),
+    }
+  }
+  async prepare(id: string): Promise<FactoryPackage> {
+    const { batch, record, rows, source, config, plan } = await this.readPlan(id)
     const template = await this.env.ARCHIVE.get('order-sorting/assets/' + config.template_key)
     const eu = await this.env.ARCHIVE.get('product-labels/eu-rep-ceramic-80mm-v1.pdf')
     if (!template || !eu) throw new PublicError('UNAVAILABLE', '分拣或欧代模板暂时无法读取。', 503)
