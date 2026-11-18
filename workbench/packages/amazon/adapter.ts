@@ -1,6 +1,8 @@
 import { z } from 'zod'
+import { auditPage } from '../title-audit/listings'
 import { type DispatchIdentity, dispatch } from '../operations/service-queue'
-import { acquireSlot, observeLimit, pacedOperation } from './request-pacing'
+import { acquirePartnerOrders, acquireSlot, amazonRetrySeconds, observeLimit, observePartnerOrders, pacedOperation } from './request-pacing'
+import { listingPage } from '../weekly-feedback/model'
 
 type PublicQuote = { price: number | null; currency: string | null; shipping: number | null }
 
@@ -44,6 +46,18 @@ const catalogPage = z.object({
   items: z.array(catalogItem).max(20),
   pagination: z.object({ nextToken: z.string().optional() }).optional(),
 })
+const catalogImageItem = z.object({
+  asin: z.string(),
+  images: z.array(z.object({
+    marketplaceId: z.string(),
+    images: z.array(z.object({ variant: z.string(), link: z.string(), height: z.number().optional() })),
+  })).optional(),
+})
+function catalogMainImage(item: z.infer<typeof catalogImageItem>) {
+  return item.images?.find((group) => group.marketplaceId === market)?.images
+    .filter((entry) => entry.variant === 'MAIN')
+    .sort((a, b) => (a.height ?? Infinity) - (b.height ?? Infinity))[0]?.link ?? null
+}
 const listingRelationship = z.object({
   type: z.string().nullish(),
   parentSkus: z.array(z.string()).nullish(),
@@ -107,9 +121,10 @@ export class AmazonUS {
     private readonly pacingDB?: D1Database,
     private readonly caller: DispatchIdentity = { owner: 'interactive' },
   ) {}
-  private async json(url: URL | string, init: RequestInit = {}): Promise<unknown> {
-    const operation = pacedOperation(url)
-    if (operation && this.pacingDB) await acquireSlot(this.pacingDB, operation)
+  private async json(url: URL | string, init: RequestInit = {}, partnerOrders = false): Promise<unknown> {
+    const partner = this.caller.owner.startsWith('partner:')
+    const operation = pacedOperation(url, partner)
+    if (operation && this.pacingDB) await acquireSlot(this.pacingDB, operation, partner ? 2000 : undefined)
     if (operation && this.pacingDB && this.caller.attempt !== undefined) {
       const active = await this.pacingDB
         .prepare("SELECT 1 FROM job_runs WHERE id=? AND attempt=? AND status='running'")
@@ -120,6 +135,8 @@ export class AmazonUS {
     let response: Response
     if (this.caller.shouldContinue && !(await this.caller.shouldContinue()))
       throw new PublicError('CONFLICT', '任务授权已变化，未发送请求。', 409)
+    if (partnerOrders && this.pacingDB)
+      await acquirePartnerOrders(this.pacingDB, this.caller.owner.startsWith('performance:'))
     await this.caller.beforeSend?.()
     try {
       response = await this.send(url, {
@@ -132,6 +149,9 @@ export class AmazonUS {
     }
     if (operation && this.pacingDB)
       await observeLimit(this.pacingDB, operation, response.headers, response.status === 429)
+    if (partnerOrders && this.pacingDB) await observePartnerOrders(this.pacingDB, response)
+    if (partner && response.status === 429)
+      throw new PublicError('SOURCE_THROTTLED','Amazon 配额暂时忙，请稍后重试。',429,'amazon',true,amazonRetrySeconds(response.headers,60))
     if (!response.ok) throw sourceError(response.status)
     return response.json().catch(() => {
       throw invalid()
@@ -156,7 +176,7 @@ export class AmazonUS {
     this.token = parsed.data.access_token
     return this.token
   }
-  private async get(path: string, params: Record<string, string>) {
+  private async get(path: string, params: Record<string, string>, partnerOrders = false) {
     const url = new URL(path, origin)
     url.search = new URLSearchParams(params).toString()
     const body = await this.json(url, {
@@ -165,13 +185,144 @@ export class AmazonUS {
         'user-agent': 'SelectionWorkbench/0.1 (Language=TypeScript)',
         accept: 'application/json',
       },
-    })
+    }, partnerOrders)
     return redactJson(body, [
       this.secrets.SP_CLIENT_ID,
       this.secrets.SP_CLIENT_SECRET,
       this.secrets.SP_REFRESH_TOKEN,
       this.token,
     ])
+  }
+
+  async submitDataKioskQuery(query: string, paginationToken?: string) {
+    const result = await this.json(new URL('/dataKiosk/2023-11-15/queries', origin), {
+      method: 'POST',
+      headers: {
+        'x-amz-access-token': await this.authorize(),
+        'content-type': 'application/json',
+        accept: 'application/json',
+      },
+      body: JSON.stringify({ query, paginationToken }),
+    })
+    return z.object({ queryId: z.string().min(1) }).parse(result).queryId
+  }
+
+  async dataKioskQueryStatus(id: string) {
+    const result = await this.get('/dataKiosk/2023-11-15/queries/' + encodeURIComponent(id), {})
+    return z.object({
+      processingStatus: z.enum(['IN_QUEUE', 'IN_PROGRESS', 'DONE', 'CANCELLED', 'FATAL']),
+      dataDocumentId: z.string().optional(),
+      errorDocumentId: z.string().optional(),
+      pagination: z.object({ nextToken: z.string().optional() }).optional(),
+    }).parse(result)
+  }
+
+  async dataKioskDocument(id: string) {
+    const result = await this.get('/dataKiosk/2023-11-15/documents/' + encodeURIComponent(id), {})
+    const { documentUrl } = z.object({ documentUrl: z.url({ protocol: /^https$/ }) }).parse(result)
+    const response = await this.send(documentUrl, { redirect: 'manual', signal: AbortSignal.timeout(60000) })
+    if (!response.ok || !response.body) throw sourceError(response.status)
+    return response.body
+  }
+  async partnerSales(start: string, end: string, sku?: string) {
+    const raw = await this.get('/sales/v1/orderMetrics', {
+      marketplaceIds: market,
+      amazonProgram: 'AmazonHaul',
+      interval: start + '--' + end,
+      granularity: 'Total',
+      ...(sku ? { sku } : {}),
+    })
+    const result = z.object({ payload: z.array(z.object({
+      interval: z.string(),
+      unitCount: z.number().int().nonnegative(),
+      orderItemCount: z.number().int().nonnegative(),
+      totalSales: z.object({
+        amount: z.union([z.string().regex(/^-?\d+(?:\.\d+)?$/), z.number().finite()]).transform(String),
+        currencyCode: z.literal('USD'),
+      }),
+    })).min(1).max(1) }).safeParse(raw)
+    if (!result.success) throw invalid()
+    return result.data.payload[0]
+  }
+
+  async partnerOrders(since: string, until: string, token?: string) {
+    return this.get('/orders/2026-01-01/orders', {
+      marketplaceIds: market,
+      lastUpdatedAfter: since,
+      lastUpdatedBefore: until,
+      maxResultsPerPage: '40',
+      includedData: 'PROCEEDS,FULFILLMENT,CANCELLATION',
+      ...(token ? { paginationToken: token } : {}),
+    }, true)
+  }
+
+  async performanceOrders(from: string, through: string, basis: 'created' | 'updated', token?: string) {
+    return this.get('/orders/2026-01-01/orders', {
+      marketplaceIds: market,
+      ...(basis === 'created' ? { createdAfter: from, createdBefore: through }
+        : { lastUpdatedAfter: from, lastUpdatedBefore: through }),
+      maxResultsPerPage: '100',
+      includedData: 'PROCEEDS,FULFILLMENT,CANCELLATION',
+      ...(token ? { paginationToken: token } : {}),
+    }, true)
+  }
+
+  async partnerListings(seller: string, since: string, until: string, token?: string) {
+    const raw = await this.get('/listings/2021-08-01/items/' + encodeURIComponent(seller), {
+      marketplaceIds: market, includedData: 'summaries,relationships,attributes,offers',
+      lastUpdatedAfter: since, lastUpdatedBefore: until, sortBy: 'sku', sortOrder: 'ASC',
+      pageSize: '20', ...(token ? { pageToken: token } : {}),
+    })
+    const base = listingPage.shape.items.element
+    const result = listingPage.extend({items: z.array(base.extend({
+      summaries: z.array(base.shape.summaries.unwrap().element.extend({
+        createdDate: z.string().nullish(), lastUpdatedDate: z.string().nullish(),
+      })).optional(),
+    }))}).parse(raw)
+    return {
+      items: result.items.map((item) => ({ ...item, kind: variationRole(item) })),
+      nextToken: result.pagination?.nextToken,
+      numberOfResults: result.numberOfResults,
+    }
+  }
+
+  async partnerListing(seller: string, sku: string, includedData: 'summaries,issues' | 'summaries,attributes,fulfillmentAvailability,offers') {
+    return this.get('/listings/2021-08-01/items/' + encodeURIComponent(seller) + '/' + encodeURIComponent(sku), {
+      marketplaceIds: market, includedData,
+    })
+  }
+
+  async partnerPatch(seller: string, sku: string, body: unknown, preview: boolean, beforeMutation?: () => void) {
+    const url = new URL('/listings/2021-08-01/items/' + encodeURIComponent(seller) + '/' + encodeURIComponent(sku), origin)
+    url.searchParams.set('marketplaceIds', market)
+    if (preview) url.searchParams.set('mode', 'VALIDATION_PREVIEW')
+    const token = await this.authorize()
+    if (this.pacingDB) await acquireSlot(this.pacingDB, 'listing-write', 2000)
+    if (this.caller.shouldContinue && !(await this.caller.shouldContinue()))
+      throw new PublicError('CONFLICT', '写入授权已经变化。', 409)
+    beforeMutation?.()
+    const response = await this.send(url, {
+      method: 'PATCH', redirect: 'manual', signal: AbortSignal.timeout(15000),
+      headers: { 'x-amz-access-token': token, 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify(body),
+    })
+    if (this.pacingDB) await observeLimit(this.pacingDB, 'listing-write', response.headers, response.status === 429)
+    if (!response.ok) {
+      if ([400, 401, 403, 404, 409, 415, 422, 429].includes(response.status))
+        return { accepted: false, reference: null, outcome: 'AMAZON_HTTP_' + response.status }
+      throw sourceError(response.status)
+    }
+    const result = z.object({
+      sku: z.literal(sku), submissionId: z.string().regex(/^[A-Za-z0-9_.-]{1,100}$/).optional(),
+      status: z.enum(['ACCEPTED','VALID','INVALID']),
+      issues: z.array(z.object({ severity: z.string() })).optional(),
+    }).parse(await response.json())
+    return {
+      accepted: preview ? result.status === 'VALID' && !result.issues?.some((issue) => issue.severity === 'ERROR')
+        : result.status === 'ACCEPTED',
+      reference: result.submissionId ?? null,
+      outcome: result.status,
+    }
   }
   async checkHaulOrderFields() {
     // Sample one page, without buyer, recipient or package data. Nothing is persisted.
@@ -241,6 +392,62 @@ export class AmazonUS {
     }
   }
 
+  async haulSalesPage(start: string, end: string, pageToken?: string) {
+    const raw = await this.get('/orders/2026-01-01/orders', {
+      marketplaceIds: market,
+      createdAfter: start,
+      createdBefore: end,
+      maxResultsPerPage: '100',
+      ...(pageToken ? { paginationToken: pageToken } : {}),
+    })
+    const page = z.object({
+      orders: z.array(z.object({
+        createdTime: z.iso.datetime({ offset: true }),
+        programs: z.array(z.string()).optional(),
+        salesChannel: z.object({ marketplaceId: z.string() }),
+        orderId: z.unknown(),
+        orderItems: z.unknown(),
+      })),
+      pagination: z.object({ nextToken: z.string().min(1).optional() }).optional(),
+    }).safeParse(raw)
+    if (!page.success || page.data.orders.some((order) => order.salesChannel.marketplaceId !== market))
+      throw invalid()
+    const from = Date.parse(start), to = Date.parse(end)
+    const orders = page.data.orders
+      .filter((order) => {
+        const time = Date.parse(order.createdTime)
+        return time >= from && time < to && order.programs?.includes('AMAZON_HAUL')
+      })
+      .map((order) => {
+        const parsed = z.object({
+          orderId: z.string().min(1),
+          orderItems: z.array(z.object({
+            orderItemId: z.string().min(1),
+            quantityOrdered: z.number().int().nonnegative(),
+            product: z.object({ sellerSku: z.string().nullish() }).nullish(),
+          })),
+        }).safeParse(order)
+        if (!parsed.success) throw invalid()
+        return {
+          id: parsed.data.orderId,
+          createdTime: order.createdTime,
+          items: parsed.data.orderItems.map((item) => ({
+            id: item.orderItemId, sku: item.product?.sellerSku?.trim() || null, units: item.quantityOrdered,
+          })),
+        }
+      })
+    return { orders, nextToken: page.data.pagination?.nextToken ?? null }
+  }
+
+  async auditListings(sellerId: string, start: number, end: number, pageToken?: string, includeHaulSignals = false) {
+    const raw = await this.get('/listings/2021-08-01/items/' + encodeURIComponent(sellerId), {
+      marketplaceIds: market, includedData: includeHaulSignals ? 'summaries,issues,attributes,offers' : 'summaries,issues', pageSize: '20',
+      createdAfter: new Date(start).toISOString(), createdBefore: new Date(end).toISOString(),
+      sortBy: 'sku', sortOrder: 'ASC', ...(pageToken ? { pageToken } : {}),
+    })
+    return auditPage.parse(raw)
+  }
+
   async searchListingsItems(sellerId: string) {
     if (!/^[A-Z0-9]{5,64}$/.test(sellerId))
       throw new PublicError('INVALID_INPUT', '请填写卖家中心的 Seller ID（Merchant Token）。', 400)
@@ -277,19 +484,89 @@ export class AmazonUS {
     return result
   }
 
-  async reviewTopics(asin: string) {
+  async recentlyUpdatedListings(seller: string, start: number, end: number, pageToken?: string, severity?: 'ERROR' | 'WARNING') {
+    const raw = await this.get('/listings/2021-08-01/items/' + encodeURIComponent(seller), {
+      marketplaceIds: market, includedData: 'summaries,issues', issueLocale: 'en_US', pageSize: '20',
+      lastUpdatedAfter: new Date(start).toISOString(), lastUpdatedBefore: new Date(end).toISOString(),
+      sortBy: 'sku', sortOrder: 'ASC', ...(pageToken ? { pageToken } : {}),
+      ...(severity ? { withIssueSeverity: severity } : {}),
+    })
+    return auditPage.parse(raw)
+  }
+
+  async listingTitleBySku(seller: string, sku: string) {
+    const raw = await this.get(
+      '/listings/2021-08-01/items/' + encodeURIComponent(seller) + '/' + encodeURIComponent(sku),
+      { marketplaceIds: market, includedData: 'summaries,attributes' },
+    )
+    const item = z.object({
+      sku: z.string(),
+      summaries: auditPage.shape.items.element.shape.summaries,
+      attributes: z.object({
+        item_name: z.array(z.object({
+          marketplace_id: z.string().optional(),
+          value: z.string(),
+        })).optional(),
+      }).optional(),
+    }).parse(raw)
+    if (item.sku !== sku) return null
+    const summary = item.summaries?.find((row) => row.marketplaceId === market)
+    const names = item.attributes?.item_name
+    const title = summary?.itemName?.trim() ||
+      names?.find((row) => row.marketplace_id === market && row.value.trim())?.value.trim() ||
+      names?.find((row) => !row.marketplace_id && row.value.trim())?.value.trim() ||
+      null
+    return { asin: summary?.asin ?? null, title }
+  }
+
+  async feedbackListings(seller: string, start: number, end: number, pageToken?: string) {
+    const raw = await this.get('/listings/2021-08-01/items/' + encodeURIComponent(seller), {
+      marketplaceIds: market, includedData: 'summaries,relationships', pageSize: '20',
+      createdAfter: new Date(start).toISOString(), createdBefore: new Date(end).toISOString(),
+      sortBy: 'sku', sortOrder: 'ASC', ...(pageToken ? { pageToken } : {}),
+    })
+    return listingPage.parse(raw)
+  }
+  async feedbackListingsBySku(seller: string, skus: string[]) {
+    const path = '/listings/2021-08-01/items/' + encodeURIComponent(seller)
+    const options = { marketplaceIds: market, includedData: 'summaries,relationships,attributes' }
+    const batch = skus.filter((sku) => !sku.includes(','))
+    const rawItems = batch.length
+      ? z.object({ items: z.array(z.unknown()) }).parse(
+          await this.get(path, { ...options, identifiersType: 'SKU', identifiers: batch.join(','), pageSize: '20' }),
+        ).items
+      : []
+    for (const sku of skus) {
+      if (!sku.includes(',')) continue
+      rawItems.push(await this.get(path + '/' + encodeURIComponent(sku), options))
+    }
+    return { items: rawItems.flatMap((raw) => {
+      const item = listingPage.shape.items.element.safeParse(raw)
+      return item.success ? [item.data] : []
+    }) }
+  }
+  async feedbackListingsByAsin(seller: string, asins: string[], pageToken?: string) {
+    const raw = await this.get('/listings/2021-08-01/items/' + encodeURIComponent(seller), {
+      marketplaceIds: market, includedData: 'summaries,relationships,attributes,offers', identifiersType: 'ASIN',
+      identifiers: asins.join(','), pageSize: '20', ...(pageToken ? { pageToken } : {}),
+    })
+    return listingPage.parse(raw)
+  }
+  async reviewTopics(asin: string, sortBy: 'MENTIONS' | 'STAR_RATING_IMPACT' = 'MENTIONS') {
     if (!/^[A-Z0-9]{10}$/.test(asin)) throw new PublicError('INVALID_INPUT', '子 ASIN 格式无效。', 400)
     const url = new URL('/customerFeedback/2024-06-01/items/' + asin + '/reviews/topics', origin)
-    url.search = new URLSearchParams({ marketplaceId: market, sortBy: 'MENTIONS' }).toString()
+    url.search = new URLSearchParams({ marketplaceId: market, sortBy }).toString()
     const token = await this.authorize()
     if (this.caller.shouldContinue && !(await this.caller.shouldContinue()))
       throw new PublicError('CONFLICT', '任务授权已变化，未发送请求。', 409)
     await this.caller.beforeSend?.()
+    if (this.pacingDB) await acquireSlot(this.pacingDB, 'feedback', this.caller.owner.startsWith('partner:') ? 2000 : undefined)
     const response = await this.send(url, {
       redirect: 'manual',
       signal: AbortSignal.timeout(12000),
       headers: { 'x-amz-access-token': token, 'user-agent': 'SelectionWorkbench/0.1' },
     })
+    if (this.pacingDB) await observeLimit(this.pacingDB, 'feedback', response.headers, response.status === 429)
     if (response.status === 204) return { asin, topics: [], period: null }
     if (response.status === 403)
       throw new PublicError(
@@ -310,7 +587,7 @@ export class AmazonUS {
             .array(
               z.object({
                 topic: z.string(),
-                asinMetrics: z.object({ numberOfMentions: z.number().nullish() }).nullish(),
+                asinMetrics: z.object({ numberOfMentions: z.number().nullish(), occurrencePercentage: z.number().nullish(), starRatingImpact: z.number().nullish() }).nullish(),
                 reviewSnippets: z.array(z.string()).nullish(),
               }),
             )
@@ -326,6 +603,8 @@ export class AmazonUS {
         name: item.topic,
         mentions: item.asinMetrics?.numberOfMentions ?? null,
         snippets: item.reviewSnippets ?? [],
+        ...(item.asinMetrics?.occurrencePercentage != null ? { occurrence: item.asinMetrics.occurrencePercentage } : {}),
+        ...(item.asinMetrics?.starRatingImpact != null ? { impact: item.asinMetrics.starRatingImpact } : {}),
       })),
     }
   }
@@ -355,6 +634,44 @@ export class AmazonUS {
         .run()
       return result
     })
+  }
+  async mainImages(asins: string[]) {
+    const raw = await this.get('/catalog/2022-04-01/items', {
+      identifiers: asins.join(','), identifiersType: 'ASIN', marketplaceIds: market,
+      pageSize: String(asins.length), includedData: 'images',
+    })
+    const data = z.object({ items: z.array(catalogImageItem) }).parse(raw)
+    return data.items.flatMap((item) => {
+      const url = catalogMainImage(item)
+      return url && asins.includes(item.asin) ? [{ asin: item.asin, url }] : []
+    })
+  }
+  async mainImageByAsin(asin: string) {
+    const raw = await this.get('/catalog/2022-04-01/items/' + encodeURIComponent(asin), {
+      marketplaceIds: market, includedData: 'images',
+    })
+    const item = catalogImageItem.parse(raw)
+    return item.asin === asin ? catalogMainImage(item) : null
+  }
+  /** Exact seller SKU -> child ASIN -> largest MAIN. Existing thumbnail consumers stay unchanged. */
+  async productMainImage(seller: string, sku: string) {
+    const listing = z.object({ sku: z.string(), summaries: z.array(z.object({
+      marketplaceId: z.string(), asin: z.string().regex(/^[A-Z0-9]{10}$/),
+      mainImage: z.object({ link: z.string() }).optional(),
+    })) }).parse(await this.get('/listings/2021-08-01/items/' + encodeURIComponent(seller) + '/' + encodeURIComponent(sku), {
+      marketplaceIds: market, includedData: 'summaries',
+    }))
+    if (listing.sku !== sku) throw invalid()
+    const summary = listing.summaries.find(s => s.marketplaceId === market)
+    if (!summary) throw invalid()
+    const item = catalogImageItem.parse(await this.get('/catalog/2022-04-01/items/' + encodeURIComponent(summary.asin), {
+      marketplaceIds: market, includedData: 'images',
+    }))
+    if (item.asin !== summary.asin) throw invalid()
+    const url = item.images?.find(g => g.marketplaceId === market)?.images
+      .filter(i => i.variant === 'MAIN').sort((a, b) => (b.height ?? 0) - (a.height ?? 0))[0]?.link ?? summary.mainImage?.link
+    if (!url) throw new PublicError('PRODUCT_IMAGE_MISSING', '亚马逊暂未提供该 SKU 的主图。', 404)
+    return { asin: summary.asin, url }
   }
   private async searchCatalog(query: string, pageSize: number, pageToken?: string) {
     const identifier = /^[A-Z0-9]{10}$/.test(query)

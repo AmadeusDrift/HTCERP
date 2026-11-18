@@ -4,6 +4,30 @@ import { AmazonUS } from '../../packages/amazon/adapter'
 const binding = { SP_CLIENT_ID: 'fixture', SP_CLIENT_SECRET: 'fixture', SP_REFRESH_TOKEN: 'fixture' }
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status })
 describe('Amazon US catalog and evidence', () => {
+  it('fetches only the needed order fields, keeps page tokens and discards other programs and boundary orders', async () => {
+    const start = '2026-11-13T08:00:00.000Z'
+    const end = '2026-11-14T08:00:00.000Z'
+    const order = {
+      orderId: 'o1', createdTime: start, programs: ['AMAZON_HAUL'],
+      salesChannel: { marketplaceId: 'ATVPDKIKX0DER' },
+      orderItems: [{ orderItemId: 'i1', quantityOrdered: 2, product: { sellerSku: 'Sku1', title: 'discarded' } }],
+    }
+    const send = vi.fn()
+      .mockResolvedValueOnce(json({ access_token: 'sample-token' }))
+      .mockResolvedValueOnce(json({
+        orders: [order, { ...order, programs: [], orderItems: [] }, { ...order, createdTime: end }],
+        pagination: { nextToken: 'p2' },
+      }))
+    const page = await new AmazonUS(binding, send).haulSalesPage(start, end, 'p1')
+    expect(page).toEqual({
+      nextToken: 'p2',
+      orders: [{ id: 'o1', createdTime: start, items: [{ id: 'i1', units: 2, sku: 'Sku1' }] }],
+    })
+    const url = new URL(send.mock.calls[1][0])
+    expect(url.searchParams.get('paginationToken')).toBe('p1')
+    expect(url.searchParams.has('includedData')).toBe(false)
+  })
+
   it('checks only US Haul order lines and returns aggregate field coverage', async () => {
     const channel = { marketplaceId: 'ATVPDKIKX0DER' }
     const line = {

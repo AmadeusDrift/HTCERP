@@ -126,6 +126,96 @@
 .sales-rules p:last-child {
   margin-bottom: 6px;
 }
+.sales-sync {
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: white;
+}
+.sales-sync-main,
+.sales-sync-main > div,
+.sales-sync-times,
+.sales-owner-search,
+.sales-owner-actions > div {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.sales-sync-main {
+  justify-content: space-between;
+}
+.sales-sync-main > div > span:not(.badge),
+.sales-sync p,
+.sales-owner-note,
+.sales-owner-search > span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.65;
+}
+.sales-sync p {
+  margin: 8px 0 0;
+}
+.sales-sync .notice {
+  margin-top: 10px;
+}
+.sales-sync-times {
+  column-gap: 18px;
+}
+.sales-quality {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0;
+  padding: 16px;
+  gap: 16px;
+}
+.sales-quality > div + div {
+  border-left: 1px solid var(--line);
+  padding-left: 16px;
+}
+.sales-quality dt {
+  color: var(--muted);
+  font-size: 12px;
+}
+.sales-quality dd {
+  margin: 6px 0 0;
+  font-size: 22px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.sales-owner-manager {
+  display: grid;
+  gap: 12px;
+}
+.sales-owner-manager > button {
+  justify-self: start;
+}
+.sales-owner-note {
+  margin: 0;
+  padding: 12px 16px 0;
+}
+.sales-owner-search {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.sales-owner-search input {
+  width: min(100%, 280px);
+}
+.sales-owner-search > span {
+  margin-left: auto;
+}
+.sales-owner-table .product-title-preview {
+  max-width: 240px;
+}
+.sales-owner-actions .notice {
+  max-width: 290px;
+  margin-top: 8px;
+  white-space: normal;
+}
+.sales-owner-actions .sales-saved {
+  margin-top: 5px;
+  color: #26765f;
+}
 @media (max-width: 600px) {
   .sales-status {
     align-items: flex-start;
@@ -140,5 +230,32 @@
   }
   .store-sales .panel-head {
     gap: 8px;
+  }
+  .sales-sync-main {
+    align-items: flex-start;
+  }
+  .sales-sync-main > div {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .sales-sync-main > button {
+    width: 100%;
+  }
+  .sales-owner-search input {
+    flex: 1;
+    min-width: 0;
+    width: auto;
+  }
+  .sales-owner-search > span {
+    width: 100%;
+    margin-left: 0;
+  }
+  .sales-quality {
+    gap: 8px;
+    padding: 14px 12px;
+  }
+  .sales-quality > div + div {
+    padding-left: 8px;
   }
 }

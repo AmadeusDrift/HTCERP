@@ -13,12 +13,19 @@ import { connections } from '../../../packages/connections/routes'
 import { positions } from '../../../packages/contracts/accounts'
 import { PublicError } from '../../../packages/contracts/errors'
 import { memberDiagnostic } from '../../../packages/contracts/presentation'
+import { groupNotificationRoutes } from '../../../packages/group-notifications/routes'
+import { inventoryDeviceRoutes } from '../../../packages/inventory-sync/device-routes'
+import { inventoryRoutes } from '../../../packages/inventory-sync/routes'
+import { orderSortingRoutes } from '../../../packages/order-sorting/routes'
 import { adminReportRoutes } from '../../../packages/operations/admin-reports'
 import { dailyRoutes } from '../../../packages/operations/daily'
 import { operationsRoutes } from '../../../packages/operations/routes'
+import { partnerAdmin, partnerRoutes } from '../../../packages/partner-api/routes'
 import { personalRoutes } from '../../../packages/personal/routes'
 import { images } from '../../../packages/research-images/routes'
 import { storeSalesRoutes } from '../../../packages/store-sales/routes'
+import { titleAudit } from '../../../packages/title-audit/routes'
+import { weeklyFeedbackRoutes } from '../../../packages/weekly-feedback/routes'
 import { type Actor, accessRole, requiredRole } from './access'
 import { sessionActor } from './account-session'
 import { accountRoutes, guardWrite, publicAuth } from './accounts'
@@ -58,12 +65,17 @@ const sizeLimit = (maxSize: number) =>
 const small = sizeLimit(16 * 1024),
   imageLimit = sizeLimit(220_000)
 const chatLimit = sizeLimit(244_000)
+const sortingLimit = sizeLimit(18_000_000)
 app.use('/api/*', (c, next) => {
+  if(/^\/api\/order-sorting\/(config|preview|run)$/.test(c.req.path))return sortingLimit(c,next)
+  if (/^\/api\/inventory-device\/pack-orders\/(?:import|[a-f\d-]{36}\/labels)$/.test(c.req.path)) return sortingLimit(c,next)
   if (/^\/api\/assistant\/conversations\/[\w-]+\/(?:turns|investigations)$/.test(c.req.path))
     return chatLimit(c, next)
   return (c.req.path === '/api/research-images' ? imageLimit : small)(c, next)
 })
 app.route('/api', publicAuth)
+app.route('/api/inventory-device', inventoryDeviceRoutes)
+app.route('/api/partner/v1', partnerRoutes)
 app.use('/api/*', async (c, next) => {
   const actor = await sessionActor(c)
   c.set('actor', actor)
@@ -98,6 +110,7 @@ app.use('/api/*', async (c, next) => {
     .run()
 })
 app.route('/api', accountRoutes)
+app.route('/api/partner-admin', partnerAdmin)
 app.route('/api/assistant', assistantRoutes)
 app.route('/api/assistant', investigationRoutes)
 app.route('/api/me', personalRoutes)
@@ -118,6 +131,11 @@ app.route('/api', operationsRoutes)
 app.route('/api', dailyRoutes)
 app.route('/api', adminReportRoutes)
 app.route('/api', storeSalesRoutes)
+app.route('/api/title-audit',titleAudit)
+app.route('/api/weekly-feedback', weeklyFeedbackRoutes)
+app.route('/api/group-notifications', groupNotificationRoutes)
+app.route('/api/inventory-sync', inventoryRoutes)
+app.route('/api/order-sorting', orderSortingRoutes)
 app.notFound((c) =>
   c.json(
     {
@@ -148,7 +166,7 @@ app.onError((e, c) => {
       retryable: err.retryable,
       requestId: c.var.requestId,
     },
-    { status: err.status, headers: { 'Cache-Control': 'no-store' } },
+    { status: err.status, headers: { 'Cache-Control': 'no-store', ...(err.status === 429 ? { 'Retry-After': String(err.retryAfterSeconds ?? (c.res.headers.get('Retry-After') || '60')) } : {}) } },
   )
 })
 export default app

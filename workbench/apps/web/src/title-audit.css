@@ -1,0 +1,67 @@
+.audit {
+  display: grid;
+  gap: 16px;
+}
+.audit-tabs,
+.audit-filters {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.audit-box {
+  background: var(--surface, #fff);
+  border: 1px solid #cfdada;
+  border-radius: 12px;
+  padding: 20px;
+  min-width: 0;
+}
+.audit h2 {
+  margin-top: 0;
+}
+.audit label {
+  display: grid;
+  gap: 4px;
+  margin: 8px 0;
+}
+.audit label:has([type="checkbox"]) {
+  display: flex;
+  align-items: center;
+}
+.audit input,
+.audit select,
+.audit textarea {
+  font: inherit;
+  border: 1px solid #bacaca;
+  border-radius: 6px;
+  padding: 7px;
+}
+.audit textarea {
+  min-height: 90px;
+  width: 100%;
+}
+.audit article {
+  border-top: 1px solid #dde4e4;
+  padding: 14px 0;
+  overflow-wrap: anywhere;
+}
+.audit mark {
+  background: #ffedbb;
+  color: #473c22;
+}
+.audit mark[data-level="重点提醒"] {
+  background: #ffd8c9;
+}
+.audit mark[data-level="低优先级"] {
+  background: #e9edef;
+  color: #45545b;
+}
+.audit mark[data-level="通过"] {
+  background: #d9efe4;
+}
+.audit summary {
+  cursor: pointer;
+}
+.audit [aria-pressed="true"] {
+  outline: 2px solid #417d76;
+}

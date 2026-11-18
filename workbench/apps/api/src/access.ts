@@ -22,7 +22,13 @@ export interface AccessBindings {
 const ranks = { viewer: 0, operator: 1, admin: 2 }
 export const accessRole = (role: Role, needed: Role) => ranks[role] >= ranks[needed]
 export function requiredRole(method: string, path: string): Role {
-  if (/^\/api\/(?:accounts|connections)(?:\/|$)/.test(path)) return 'admin'
+  if (method === 'POST' && /^\/api\/order-sorting\/pack\/[a-f\d-]{36}\/factory-package$/i.test(path)) return 'operator'
+  if(method==='POST'&&/^\/api\/order-sorting\/(preview|picking-preview|run)$/.test(path))return 'operator'
+  if(path==='/api/order-sorting/config')return 'admin'
+  if (method === 'POST' && /^\/api\/weekly-feedback\/(?:run|action)$/.test(path)) return 'operator'
+  if(method === 'POST' && path === '/api/title-audit/preview') return 'viewer'
+  if(method === 'POST' && ['/api/title-audit/run','/api/title-audit/terms'].includes(path)) return 'operator'
+  if (/^\/api\/(?:accounts|connections|group-notifications|inventory-sync|partner-admin)(?:\/|$)/.test(path)) return 'admin'
   if (
     method === 'POST' &&
     /^\/api\/assistant\/(?:conversations\/[\da-f-]{36}\/investigations|investigations\/[\da-f-]{36}\/(?:pause|resume|cancel|messages)|investigations\/[\da-f-]{36}\/proposals\/[\da-f-]{36}\/reject)$/i.test(

@@ -5,6 +5,7 @@ export class PublicError extends Error {
     readonly status: number,
     readonly source = 'workbench',
     readonly retryable = false,
+    readonly retryAfterSeconds?: number,
   ) {
     super(message)
   }

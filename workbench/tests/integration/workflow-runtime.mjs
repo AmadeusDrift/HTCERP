@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { readdirSync, readFileSync } from 'node:fs'
 import { setTimeout as delay } from 'node:timers/promises'
 import { exportJWK, generateKeyPair, SignJWT } from 'jose'
@@ -6,6 +7,13 @@ import { convertV4MiniflareOptions, Miniflare } from 'miniflare'
 import { unstable_splitSqlQuery as splitSQL } from 'wrangler'
 
 const calls = []
+const wecomMessages = []
+const salesMessages = []
+const salesWindows = []
+let rejectImage = true
+let exemption = 'EXEMPT_UNTIL_EXPIRY_DATE'
+let infringementReason = 'Trademark misuse'
+const samplePng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+xMrkAAAAASUVORK5CYII=', 'base64')
 let assistantModelCalls = 0
 const { publicKey, privateKey } = await generateKeyPair('RS256')
 const issuer = 'https://fixture.cloudflareaccess.com'
@@ -13,9 +21,104 @@ const jwk = { ...(await exportJWK(publicKey)), kid: 'fixture-key', alg: 'RS256' 
 async function fixture(request) {
   const url = new URL(request.url)
   calls.push(url.pathname)
+  if (url.href === 'https://m.media-amazon.com/images/I/test.jpg')
+    return new Response(samplePng, { headers: { 'content-type': 'image/png' } })
+  if (url.href === 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=fixture-group-1122') {
+    const message = await request.json()
+    wecomMessages.push(message)
+    if (message.msgtype === 'image' && rejectImage) {
+      rejectImage = false
+      return Response.json({ errcode: 45009 })
+    }
+    return Response.json({ errcode: 0 })
+  }
+  if (url.href === 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=fixture-sales-3344') {
+    salesMessages.push(await request.json())
+    return Response.json({ errcode: 0 })
+  }
   if (url.href === 'https://api.amazon.com/auth/o2/token') {
     assert.equal((await request.formData()).get('refresh_token'), 'fixture-refresh')
     return Response.json({ access_token: 'fixture-access' })
+  }
+  if (url.origin === 'https://sellingpartnerapi-na.amazon.com' && url.pathname === '/sales/v1/orderMetrics') {
+    const interval = '2025-11-13T08:00:00.000Z--2025-11-13T15:00:00.000Z'
+    assert.equal(url.searchParams.get('interval'), interval)
+    assert.equal(url.searchParams.get('amazonProgram'), 'AmazonHaul')
+    return Response.json({ payload: [{ interval, unitCount: 22, orderItemCount: 20, totalSales: { amount: 10, currencyCode: 'USD' } }] })
+  }
+  if (url.origin === 'https://sellingpartnerapi-na.amazon.com' && url.pathname === '/orders/2026-01-01/orders') {
+    assert.equal(url.searchParams.get('marketplaceIds'), 'ATVPDKIKX0DER')
+    assert.equal(url.searchParams.get('includedData'), null)
+    const start = url.searchParams.get('createdAfter')
+    const end = url.searchParams.get('createdBefore')
+    const entry = (id, skus, programs = ['AMAZON_HAUL']) => ({
+      orderId: id, createdTime: start, programs,
+      salesChannel: { marketplaceId: 'ATVPDKIKX0DER' },
+      orderItems: skus.map(([sellerSku, quantityOrdered], index) => ({
+        orderItemId: 'i' + index, quantityOrdered, product: { sellerSku },
+      })),
+    })
+    const mixed = entry('mixed', [['C-JIT-01', start === '2026-11-12T08:00:00.000Z' ? 2 : 3], ['C-02', 1], ['COLLECTION-J1T-1', 2]])
+    if (url.searchParams.has('paginationToken')) {
+      assert.equal(url.searchParams.get('paginationToken'), 'fixture-next')
+      return Response.json({ orders: [mixed, entry('second', [
+        ['HUNI-01', 2], ['B.JA-01', 1], ['LAFA-DX-XCAR', 1], ['unassigned', 1],
+      ])] })
+    }
+    salesWindows.push([start, end])
+    return Response.json({
+      orders: [mixed, { ...entry('next-window', [['C-JIT-01', 4]]), createdTime: end }, entry('outside-haul', [['C-03', 20]], [])],
+      pagination: { nextToken: 'fixture-next' },
+    })
+  }
+  if (
+    url.origin === 'https://sellingpartnerapi-na.amazon.com' &&
+    url.pathname === '/listings/2021-08-01/items/SELLERA'
+  ) {
+    const recent = url.searchParams.has('lastUpdatedAfter')
+    if (recent) {
+      assert.ok(url.searchParams.has('lastUpdatedBefore'))
+      assert.equal(url.searchParams.get('includedData'), 'summaries,issues')
+    }
+    return Response.json({
+      numberOfResults: 1,
+      items: [
+        {
+          sku: 'WEEKLY-001',
+          summaries: [
+            {
+              marketplaceId: 'ATVPDKIKX0DER',
+              asin: 'B000000001',
+              itemName: 'Printed Mug',
+              mainImage: { link: 'https://m.media-amazon.com/images/I/test.jpg' },
+            },
+          ],
+          relationships: [{ marketplaceId: 'ATVPDKIKX0DER', relationships: [] }],
+          ...(recent ? { issues: [{ code: '18146', message: infringementReason, attributeNames: ['item_name'], enforcements: {
+            actions: [{ action: 'CATALOG_ITEM_REMOVED' }], exemption: { status: exemption },
+          } }] } : {}),
+        },
+      ],
+    })
+  }
+  if (
+    url.origin === 'https://sellingpartnerapi-na.amazon.com' &&
+    url.pathname === '/customerFeedback/2024-06-01/items/B000000001/reviews/topics'
+  ) {
+    return Response.json({
+      asin: 'B000000001',
+      marketplaceId: 'ATVPDKIKX0DER',
+      dateRange: { startDate: '2026-05-01', endDate: '2026-11-01' },
+      topics: {
+        negativeTopics: [
+          {
+            topic: 'Print Quality',
+            asinMetrics: { numberOfMentions: 12, starRatingImpact: -0.2 },
+            reviewSnippets: ['Blurry print'],
+          },
+        ],
+      },
+    })
   }
   if (
     url.origin === 'https://sellingpartnerapi-na.amazon.com' &&
@@ -232,7 +335,10 @@ const mf = new Miniflare(
         ...shared,
         name: 'jobs',
         scriptPath: '.local/dry-jobs/index.js',
-        bindings: { CONNECTIONS_KEY: 'cd'.repeat(32) },
+        bindings: {
+          CONNECTIONS_KEY: 'cd'.repeat(32),
+          WECOM_GROUP_WEBHOOKS: JSON.stringify({ trial: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=fixture-group-1122' }),
+        },
         workflows: { RUNNER: binding, ASSISTANT_RUNNER: assistantBinding },
       },
       {
@@ -308,6 +414,19 @@ try {
     })
   }
   assert.equal((await api('/connections/amazon/test', {})).status, 'catalog_verified')
+  await api('/connections/amazon/seller', { sellerId: 'SELLERA' })
+  const weekly = await api('/weekly-feedback/run', {})
+  let weeklyReport
+  for (let attempt = 0; attempt < 100; attempt++) {
+    weeklyReport = await api('/weekly-feedback?run=' + weekly.id)
+    if (weeklyReport.run.status !== 'running') break
+    await delay(150)
+  }
+  assert.equal(weeklyReport.run.status, 'done', JSON.stringify(weeklyReport))
+  assert.deepEqual(weeklyReport.rows[0].skus, ['WEEKLY-001'])
+  assert.equal(weeklyReport.rows[0].topics[0].mentions, 12)
+  assert.equal(weeklyReport.rows[0].image, 'https://m.media-amazon.com/images/I/test.jpg')
+  assert.equal((await api('/weekly-feedback/notification?run=' + weekly.id)).sent, false)
   const strategy = await api('/strategy')
   assert.deepEqual(strategy.connections, { geekbi: true, productData: true, openrouter: true })
   await api('/strategy', {
@@ -403,6 +522,177 @@ try {
     return cookie.split(';')[0]
   }
   const ownerCookie = await loginCookie('owner')
+  const admin = async (path, body) => {
+    const response = body === undefined
+      ? await secure.fetch(site + '/api' + path, { headers: { Cookie: ownerCookie } })
+      : await json(path, body, ownerCookie)
+    const data = await response.json()
+    assert.ok(response.ok, JSON.stringify(data))
+    return data
+  }
+  const group = await admin('/group-notifications/groups', { name: '验收测试群', webhookKey: 'trial' })
+  await db.prepare("INSERT INTO accounts(id,username,role,salt,password_hash) VALUES('wecom-operator','Peter','operator','','')").run()
+  await admin('/weekly-feedback/wecom-member', { accountId: 'wecom-operator', userid: 'wecom_peter' })
+  await admin(`/group-notifications/groups/${group.id}/members`, { accountId: 'wecom-operator', enabled: true })
+  const trial = await admin(`/group-notifications/groups/${group.id}/trial`, {
+    service: 'infringement', accountId: 'wecom-operator', sku: 'WEEKLY-001',
+  })
+  assert.match((await db.prepare('SELECT content FROM notification_deliveries WHERE id=?').bind(trial.id).first()).content, /商品标题：Printed Mug/)
+  let delivery
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const { deliveries } = await admin(`/group-notifications/groups/${group.id}/deliveries`)
+    delivery = deliveries.find((row) => row.id === trial.id)
+    if (delivery?.phase === 'image' && delivery?.error) break
+    await delay(100)
+  }
+  assert.equal(delivery?.status, 'queued', JSON.stringify({ delivery, calls: calls.slice(-8), wecomMessages }))
+  assert.equal(wecomMessages.length, 2)
+  assert.deepEqual(wecomMessages[0].text.mentioned_list, ['wecom_peter'])
+  assert.match(wecomMessages[0].text.content, /SKU：WEEKLY-001/)
+  assert.deepEqual(wecomMessages[1], {
+    msgtype: 'image', image: { base64: samplePng.toString('base64'), md5: createHash('md5').update(samplePng).digest('hex') },
+  })
+  const { RUNNER } = await mf.getBindings('jobs')
+  const tick = Date.now()
+  async function runScan(time) {
+    const id = 'group-notification-tick-' + time
+    const instance = await RUNNER.create({ id, params: { runId: id } })
+    for (let attempt = 0; attempt < 120; attempt++) {
+      const result = await instance.status()
+      if (result.status === 'complete') return
+      assert.notEqual(result.status, 'errored', JSON.stringify(result))
+      await delay(100)
+    }
+    assert.fail('Group notification scan did not complete')
+  }
+  await runScan(tick)
+  assert.deepEqual(wecomMessages.map((message) => message.msgtype), ['text', 'image', 'image'])
+  assert.deepEqual(wecomMessages[2], wecomMessages[1])
+  assert.equal((await admin(`/group-notifications/groups/${group.id}/deliveries`)).deliveries[0].status, 'sent')
+  const infringement = await admin('/group-notifications/infringements')
+  assert.equal(infringement.rows[0].asin, 'B000000001')
+  assert.equal(infringement.scan.error, null)
+  await admin('/weekly-feedback/assign', { run: weekly.id, sku: 'WEEKLY-001', accountId: 'wecom-operator' })
+  await admin('/group-notifications/services/infringement', { groupId: group.id })
+  await runScan(tick + 30 * 60000)
+  assert.equal(wecomMessages.length, 3)
+  exemption = 'NOT_EXEMPT'
+  await runScan(tick + 45 * 60000)
+  assert.equal(wecomMessages.length, 3)
+  infringementReason = 'Trademark misuse in the title'
+  await runScan(tick + 60 * 60000)
+  assert.deepEqual(wecomMessages.map((message) => message.msgtype), ['text', 'image', 'image', 'text', 'image'])
+  assert.match(wecomMessages[3].text.content, /涉及运营：Peter/)
+  assert.match(wecomMessages[3].text.content, /亚马逊原文：Trademark misuse in the title/)
+  assert.match(wecomMessages[3].text.content, /亚马逊位置字段：商品标题（item_name）/)
+  assert.equal((await admin('/group-notifications')).groups[0].webhookHint, '1122')
+  await admin('/group-notifications/daily-sales/teams', { team: 'c', accountIds: ['wecom-operator'] })
+  await db.prepare(`INSERT INTO accounts(id,username,role,salt,password_hash)
+    VALUES('test-nick','Nick','operator','',''),('test-jack','Jack','operator','','')`).run()
+  await db.prepare(`INSERT INTO weekly_feedback_owner_rules VALUES
+    ('SELLERA','ATVPDKIKX0DER','prefix','C-',0,'wecom-operator','wecom-operator'),
+    ('SELLERA','ATVPDKIKX0DER','prefix','HUNI',1,'test-nick','wecom-operator'),
+    ('SELLERA','ATVPDKIKX0DER','contains_suffix','.JA-',1,'test-jack','wecom-operator')`).run()
+  await admin('/group-notifications/daily-sales/teams', { team: 'a', accountIds: ['test-nick'] })
+  await admin('/group-notifications/daily-sales/teams', { team: 'b', accountIds: ['test-jack'] })
+  assert.equal((await json('/group-notifications/daily-sales/teams', {
+    team: 'a', accountIds: ['test-nick', 'test-jack'],
+  }, ownerCookie)).status, 409)
+  const mainAPI = await mf.getWorker('api')
+  const registerSales = await mainAPI.fetch(site + '/api/group-notifications/groups', {
+    method: 'POST',
+    headers: { Origin: site, 'Content-Type': 'application/json', Cookie: ownerCookie },
+    body: JSON.stringify({
+      name: '销量验收群', webhookUrl: 'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=fixture-sales-3344',
+      dailySales: true,
+    }),
+  })
+  assert.equal(registerSales.status, 201, await registerSales.clone().text())
+  const sales = await registerSales.json()
+  assert.equal((await admin('/group-notifications/daily-sales')).target.id, sales.id)
+  assert.equal((await admin('/group-notifications/daily-sales')).target.scheduled, 0)
+  assert.equal((await json('/group-notifications/services/daily-sales', { groupId: sales.id }, ownerCookie)).status, 409)
+  assert.equal((await json('/group-notifications/services/daily-sales', { groupId: group.id }, ownerCookie)).status, 409)
+  const salesDate = '2026-11-13'
+  async function runSales(mode) {
+    const salesTick = Date.parse(mode === 'slot' ? '2026-11-13T15:00:00Z' : '2026-11-14T08:00:00Z')
+    const id = mode === 'auto' ? 'daily-sales-auto-' + salesDate
+      : mode === 'slot' ? 'daily-sales-slot-' + salesTick
+        : 'daily-sales-preview-' + salesDate + '-00000000-0000-4000-8000-000000000002'
+    const instance = await RUNNER.create({ id, params: { runId: id, ...(mode === 'preview' ? {} : { salesTick }) } })
+    for (let attempt = 0; attempt < 120; attempt++) {
+      const result = await instance.status()
+      if (result.status === 'complete') return
+      assert.notEqual(result.status, 'errored', JSON.stringify(result))
+      await delay(100)
+    }
+    assert.fail('Daily sales workflow did not complete')
+  }
+  await runSales('preview')
+  assert.deepEqual(salesMessages, [])
+  const salesReport = await admin('/group-notifications/daily-sales')
+  assert.equal(salesReport.run.status, 'ready')
+  assert.match(salesReport.preview, /^【美国站 Haul U2 销量日报】2026-11-13（美西）\nHaul U2 总计｜11 件\n　└ 其中 JIT｜5 件（45.5%）/)
+  assert.match(salesReport.preview, /　　A 组｜3 件（27.3%）｜含 JIT 0 件（组内 0.0%，占总 JIT 0.0%）/)
+  assert.match(salesReport.preview, /　　B 组｜1 件（9.1%）｜含 JIT 0 件（组内 0.0%，占总 JIT 0.0%）/)
+  assert.match(salesReport.preview, /　　C 组｜4 件（36.4%）｜含 JIT 3 件（组内 75.0%，占总 JIT 60.0%）/)
+  assert.match(salesReport.preview, /　　集美｜2 件（18\.2%）｜占总 JIT 40\.0%/)
+  assert.match(salesReport.preview, /　　未归类｜1 件（9.1%）/)
+  const salesTrial = await admin(`/group-notifications/groups/${sales.id}/trial`, { service: 'daily-sales' })
+  for (let attempt = 0; attempt < 120; attempt++) {
+    if ((await admin('/group-notifications/daily-sales')).trial?.status === 'sent') break
+    await delay(100)
+  }
+  assert.deepEqual(salesMessages.splice(0), [{
+    msgtype: 'text', text: { content: '【测试】' + salesReport.preview, mentioned_list: ['@all'] },
+  }])
+  const trialRow = await db.prepare('SELECT trial FROM notification_deliveries WHERE id=?').bind(salesTrial.id).first()
+  assert.equal(trialRow.trial, 1)
+  await admin('/group-notifications/services/daily-sales', { groupId: sales.id })
+  await db.prepare(`INSERT INTO daily_sales_year_baselines
+    (sale_date,hours,source,source_ref,quantity,start_at,end_at,imported_at) VALUES
+    ('2025-11-13',24,'workbook','unverified',999,NULL,NULL,'2026-11-13T08:00:00.000Z'),
+    ('2025-11-13',24,'amazon-orders','fixture',8,'2025-11-13T08:00:00.000Z','2025-11-14T08:00:00.000Z','2026-11-13T08:00:00.000Z')`).run()
+  assert.equal((await json('/group-notifications/services/infringement', { groupId: sales.id }, ownerCookie)).status, 409)
+  await runSales('auto')
+  assert.deepEqual(salesWindows.slice(-2), [
+    ['2026-11-13T08:00:00.000Z', '2026-11-14T08:00:00.000Z'],
+    ['2026-11-12T08:00:00.000Z', '2026-11-13T08:00:00.000Z'],
+  ])
+  const cumulative = (await admin('/group-notifications/daily-sales')).preview
+  assert.equal(cumulative, salesMessages[0].text.content)
+  const backfillId = 'daily-sales-backfill-' + salesDate
+  const backfill = await RUNNER.create({ id: backfillId, params: { runId: backfillId } })
+  for (let attempt = 0; attempt < 120; attempt++) {
+    const result = await backfill.status()
+    if (result.status === 'complete') break
+    assert.notEqual(result.status, 'errored', JSON.stringify(result))
+    await delay(100)
+  }
+  assert.equal((await backfill.status()).status, 'complete')
+  await runScan(tick + 90 * 60000)
+  await runSales('slot')
+  assert.equal(salesMessages.length, 3)
+  assert.match(cumulative, /^【美国站 Haul U2 时段销量】\n2026-11-13 16:00 至 2026-11-14 16:00（北京时间）\nHaul U2 总计｜11 件（比昨天同期增加 10\.0%，比去年同期增加 37\.5%）/)
+  assert.match(cumulative, /其中 JIT｜5 件（45\.5%）（比昨天同期增加 25\.0%）/)
+  assert.match(cumulative, /　　集美｜2 件（18\.2%）｜占总 JIT 40\.0%/)
+  assert.ok(Buffer.byteLength(cumulative) < 2048)
+  assert.deepEqual(salesMessages[0].text.mentioned_list, ['@all'])
+  assert.deepEqual(salesMessages[1], {
+    msgtype: 'text', text: { content: salesReport.preview },
+  })
+  assert.deepEqual(salesWindows.slice(-2), [
+    ['2026-11-13T08:00:00.000Z', '2026-11-13T15:00:00.000Z'],
+    ['2026-11-12T08:00:00.000Z', '2026-11-12T15:00:00.000Z'],
+  ])
+  assert.match(salesMessages[2].text.content, /^【美国站 Haul U2 时段销量】\n2026-11-13 16:00 至 2026-11-13 23:00（北京时间）\nHaul U2 总计｜11 件（比昨天同期增加 10\.0%，比去年同期减少 50\.0%）/)
+  assert.deepEqual(await db.prepare("SELECT quantity FROM daily_sales_year_baselines WHERE sale_date='2025-11-13' AND hours=7").first(), { quantity: 22 })
+  assert.match(salesMessages[2].text.content, /其中 JIT｜5 件（45\.5%）（比昨天同期增加 25\.0%）/)
+  assert.doesNotMatch(salesMessages[2].text.content, /销量日报】/)
+  assert.deepEqual(salesMessages[2].text.mentioned_list, ['@all'])
+  const afterSlot = await admin('/group-notifications/daily-sales')
+  assert.equal(afterSlot.delivery.status, 'sent')
+  assert.equal(afterSlot.preview, salesReport.preview)
   const created = await json(
     '/accounts',
     { username: 'reader', password, position: 'operations_lead' },
@@ -415,6 +705,8 @@ try {
   const readerCookie = await loginCookie('reader')
   const memberGet = (path) => secure.fetch(site + '/api' + path, { headers: { Cookie: readerCookie } })
   assert.equal((await memberGet('/connections')).status, 403)
+  assert.equal((await memberGet('/group-notifications')).status, 403)
+  assert.equal((await memberGet('/group-notifications/daily-sales')).status, 403)
   assert.equal((await (await memberGet('/auth/me')).json()).position, 'operations_lead')
   const memberStrategy = await (await memberGet('/strategy')).json()
   assert.equal('models' in memberStrategy || 'connections' in memberStrategy, false)

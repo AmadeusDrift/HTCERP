@@ -4,6 +4,10 @@ import type { GeekSlot } from './models'
 import { Dialog, ErrorBox, Field, request } from './ui'
 
 const providers = {
+  wecom: {
+    name: '企业微信自建应用',
+    fields: { WECOM_CORP_ID: '企业 ID（Corp ID）', WECOM_AGENT_ID: '应用 Agent ID', WECOM_SECRET: '应用 Secret' },
+  },
   geekbi: {
     name: '极鲸云 API',
     fields: { GB_APP_KEY: 'App Key', GB_APP_SECRET: 'App Secret' },

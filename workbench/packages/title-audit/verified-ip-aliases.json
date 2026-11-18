@@ -1,0 +1,45 @@
+[
+  {
+    "name": "Cyberpunk 2077",
+    "family": "Cyberpunk",
+    "aliases": ["Cyber Punk 2077", "Cyberpunk2077", "Cyber Punk2077"],
+    "url": "https://www.cyberpunk.net/us/en/cyberpunk-2077"
+  },
+  {
+    "name": "Cyberpunk: Edgerunners",
+    "family": "Cyberpunk",
+    "aliases": ["Cyber Punk Edgerunners", "CyberpunkEdgerunners"],
+    "url": "https://www.cyberpunk.net/en/edgerunners"
+  },
+  {
+    "name": "Cyberpunk 2077: Phantom Liberty",
+    "family": "Cyberpunk",
+    "aliases": ["Cyber Punk 2077 Phantom Liberty", "Cyberpunk2077 Phantom Liberty", "Cyberpunk Phantom Liberty", "Cyber Punk Phantom Liberty"],
+    "url": "https://www.cyberpunk.net/en/news/45460/announcing-cyberpunk-2077-phantom-liberty"
+  },
+  {
+    "name": "Dark Knight",
+    "family": "DC",
+    "aliases": ["DarkKnight"],
+    "contextTerms": ["Batman", "Bruce Wayne", "Gotham City", "Batmobile", "Bat-Signal", "Caped Crusader", "DC Comics", "DC Studios"],
+    "url": "https://www.dc.com/characters/batman"
+  },
+  {
+    "name": "The Dark Knight",
+    "family": "DC",
+    "aliases": ["The DarkKnight", "TheDarkKnight"],
+    "url": "https://www.dc.com/movies/the-dark-knight-2008"
+  },
+  {
+    "name": "The Dark Knight Rises",
+    "family": "DC",
+    "aliases": ["Dark Knight Rises", "DarkKnight Rises", "DarkKnightRises", "TheDarkKnightRises"],
+    "url": "https://www.dc.com/movies/the-dark-knight-rises-2012"
+  },
+  {
+    "name": "Batman: The Dark Knight Returns",
+    "family": "DC",
+    "aliases": ["The Dark Knight Returns", "Dark Knight Returns", "DarkKnight Returns", "DarkKnightReturns", "TheDarkKnightReturns"],
+    "url": "https://www.dc.com/graphic-novels/the-dark-knight-returns-1986/batman-the-dark-knight-returns"
+  }
+]

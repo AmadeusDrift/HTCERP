@@ -8,4 +8,9 @@ dist/
 test-results/
 playwright-report/
 *.local.jsonc
+/bundle/
+/status-audit-bundle/
+/two-status-bundle/
+/prototypes/
+/docs/2026-11-16-SellerFlex库存同步核查与规则确认.md
 

@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HTC ERP 库存连接</title><link rel="stylesheet" href="connection.css"></head>
+<body>
+<main>
+  <header><span class="badge">自动补库 · 每批最多十行</span><h1>连接 HTC ERP</h1><p>ERP 启用自动补库后，从下一次新开始的巡检生成任务，在 A1C5 的 Receive 页面连续执行每批最多十行。空闲时优先检查两行试跑，再检查自动任务。</p></header>
+  <section aria-label="ERP 登录连接">
+    <label>设备名称<input id="device-name" required maxlength="80" placeholder="仓库 Edge 电脑" autocomplete="off"></label>
+    <p id="erp-session" role="status" aria-live="polite">正在检测本浏览器中的 ERP 登录…</p>
+    <div class="actions"><button id="connect-erp" type="button" disabled>一键连接当前 ERP</button><button id="detect-erp" type="button">重新检测</button><button id="open-erp" type="button">打开 ERP / 登录</button></div>
+    <p class="footnote">连接只登记本机。请在 ERP 库存页选择执行设备或交接；连接不会自动接管任务。检测不会自动连接，也不会刷新您正在填写的页面。</p>
+  </section>
+  <details id="pair-fallback"><summary>使用配对码连接（备用 / 本地测试）</summary>
+  <form id="pair-form">
+    <label>ERP 地址<input id="base-url" type="url" value="https://htcerp.app" required autocomplete="off"></label>
+    <label>一次性配对码<input id="pair-code" type="password" required maxlength="128" autocomplete="off" spellcheck="false"></label>
+    <button type="submit">使用配对码连接</button>
+  </form></details>
+  <section aria-label="连接状态"><h2>连接状态</h2><dl id="details"></dl><p id="notice" role="status" aria-live="polite"></p></section>
+  <div class="actions"><button id="poll" type="button">立即检查</button><button id="disconnect" type="button">断开本机连接</button></div>
+  <div id="recovery" hidden><p>旧设备凭据已失效。可将模拟回执、完整真实执行记录与旧设备身份保留在本机，再解除旧配对；归档不代表 ERP 已确认，且不会向新设备发送。</p><button id="archive-pending" type="button">保留回执并解除旧配对</button><p id="archive-full" hidden>本机已保留 10 份异常回执，请联系管理员备份核对。现有回执不会被覆盖。</p></div>
+  <p class="footnote">仓库与卖家账户由 ERP 当前授权范围绑定。此处没有全量库存读取；每小时巡检由 ERP 调度，插件空闲时每分钟检查任务，批次回执确认后约五秒继续下一批。浏览器关闭、电脑休眠时轮询暂停。</p>
+  <p id="test-warning" hidden>本地集成测试版本：允许 http://127.0.0.1:&lt;端口&gt;。仅连接隔离测试数据库。</p>
+</main><script src="connection.js"></script>
+</body></html>

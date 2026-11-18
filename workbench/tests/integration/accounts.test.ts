@@ -441,6 +441,23 @@ it('restricts account administration and invalidates prior sessions on reset or 
   expect((await get('/session', operator)).status).toBe(401)
 })
 
+it('uses the default password for new operators and accepts eight-character member resets', async () => {
+  await setup()
+  const admin = cookieOf(await login('owner'))
+  const created = await post('/accounts', { username: 'operator1', role: 'operator' }, admin)
+  expect(created.status).toBe(201)
+  const account = await created.json() as { id: string }
+  const initial = await login('operator1', '12345678')
+  expect(initial.status).toBe(200)
+  const path = '/accounts/' + account.id
+  expect((await post(path, { password: '1234567' }, admin, 'PATCH')).status).toBe(400)
+  expect((await post(path, { role: 'admin', password: '87654321' }, admin, 'PATCH')).status).toBe(400)
+  expect((await post(path, { password: '87654321' }, admin, 'PATCH')).status).toBe(200)
+  expect((await login('operator1', '87654321')).status).toBe(200)
+  expect((await login('operator1', '12345678')).status).toBe(401)
+  expect((await post('/accounts', { username: 'reader1', role: 'viewer' }, admin)).status).toBe(400)
+})
+
 it('migrates existing roles and sessions without assigning positions', () => {
   const legacy = new DatabaseSync(':memory:')
   try {

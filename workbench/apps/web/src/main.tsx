@@ -37,6 +37,9 @@ import { Potential } from './potential'
 import { Research } from './research'
 import { Settings } from './settings'
 import { StoreHome, StorePerformance } from './store-sales'
+import { TitleAudit } from './title-audit'
+import { FeedbackCenter } from './feedback'
+import { OrderSortingPage } from './order-sorting'
 import { Tasks } from './tasks'
 import { Dialog, Empty, PageLink, SearchForm, useData, useGo, useLocation } from './ui'
 import './styles.css'
@@ -44,6 +47,7 @@ import './store-sales.css'
 
 const nav = [
   { url: '/', name: '发现商品', icon: Compass },
+  { url: '/title-audit', name: '文字侵权检测', icon: ListChecks },
   { url: '/potential', name: '潜力新品', icon: ListChecks },
   { url: '/research', name: 'AI 研究台', icon: FlaskConical },
   { url: '/candidates', name: '候选与观察池', icon: Bookmark },
@@ -52,6 +56,8 @@ const nav = [
 ]
 const homeItem = { url: '/home', name: '首页', icon: House }
 const performanceItem = { url: '/performance', name: '业绩表', icon: Table2 }
+const feedbackItem = { url: '/feedback', name: '差评专区', icon: ListChecks }
+const orderSortingItem = { url: '/order-sorting', name: '订单分拣', icon: Table2 }
 const settingsItem = { url: '/settings', name: '设置', icon: Settings2 }
 function Shell() {
   const { path, params } = useLocation(),
@@ -60,7 +66,7 @@ function Shell() {
     [selectionOpen, setSelectionOpen] = useState(true),
     [help, setHelp] = useState(false),
     s = useData<Session>('/session')
-  const current = [homeItem, ...nav, performanceItem, settingsItem].find((n) => n.url === path) || nav[0]
+  const current = [homeItem, ...nav, orderSortingItem, feedbackItem, performanceItem, settingsItem].find((n) => n.url === path) || nav[0]
   function navLink(item: (typeof nav)[number]) {
     const active = current.url === item.url
     return (
@@ -119,7 +125,7 @@ function Shell() {
           <nav id="selection-nav" aria-label="选品工作台" hidden={!selectionOpen}>
             {nav.map(navLink)}
           </nav>
-          <nav aria-label="业绩与设置">{[performanceItem, settingsItem].map(navLink)}</nav>
+          <nav aria-label="订单、差评、业绩与设置">{[orderSortingItem, feedbackItem, performanceItem, settingsItem].map(navLink)}</nav>
         </div>
         <div className="side-bottom">
           <PageLink
@@ -253,6 +259,9 @@ const settingsRoute = createRoute({
 const router = createRouter({
   routeTree: rootRoute.addChildren([
     indexRoute,
+    createRoute({ getParentRoute: () => rootRoute, path: '/order-sorting', component: OrderSortingPage }),
+    createRoute({ getParentRoute: () => rootRoute, path: '/feedback', component: FeedbackCenter }),
+    createRoute({ getParentRoute: () => rootRoute, path: '/title-audit', component: TitleAudit }),
     createRoute({ getParentRoute: () => rootRoute, path: '/home', component: StoreHome }),
     createRoute({ getParentRoute: () => rootRoute, path: '/performance', component: StorePerformance }),
     loginRoute,

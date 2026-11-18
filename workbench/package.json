@@ -9,13 +9,14 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "build": "vite build apps/web --outDir ../../dist/web --emptyOutDir",
+    "build": "node scripts/package-sellerflex.mjs && vite build apps/web --outDir ../../dist/web --emptyOutDir",
     "test": "vitest run",
     "test:e2e": "playwright test",
     "db:local": "node scripts/setup-local.mjs",
     "dev": "node scripts/dev.mjs",
     "stop": "node scripts/stop.mjs",
     "test:workflow": "node tests/integration/workflow-runtime.mjs",
+    "test:inventory-runtime": "node tests/integration/inventory-runtime.mjs",
     "check:unused": "knip --include files,dependencies,unlisted",
     "check:style": "ultracite check apps packages scripts tests playwright.config.ts vitest.config.ts --diagnostic-level=error",
     "check:workers": "wrangler deploy --config wrangler.jobs.jsonc --dry-run --outdir .local/dry-jobs && wrangler deploy --config wrangler.api.jsonc --dry-run --outdir .local/dry-api"
@@ -27,11 +28,15 @@
     "@orpc/server": "^1",
     "@tanstack/react-query": "^5",
     "@tanstack/react-router": "^1",
+    "exceljs": "4.4.0",
     "hono": "^4",
     "jose": "^6",
+    "jszip": "3.10.1",
     "lucide-react": "^0.577.0",
+    "pdf-lib": "1.17.1",
     "react": "^19",
     "react-dom": "^19",
+    "unpdf": "1.8.1",
     "zod": "^4"
   },
   "devDependencies": {

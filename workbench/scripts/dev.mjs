@@ -37,7 +37,7 @@ const child = spawn(
     testing ? '9341' : '9331',
     '--persist-to',
     stateDir,
-    ...(existsSync('.dev.vars') ? ['--env-file', '.dev.vars'] : []),
+    ...(!testing && existsSync('.dev.vars') ? ['--env-file', '.dev.vars'] : []),
     '--env-file',
     connectionKeyFile(),
     '--var',
@@ -49,7 +49,7 @@ const child = spawn(
     env: {
       ...process.env,
       WRANGLER_SEND_METRICS: 'false',
-      CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV: 'true',
+      CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV: testing ? 'false' : 'true',
       CLOUDFLARE_INCLUDE_PROCESS_ENV: 'false',
     },
   },

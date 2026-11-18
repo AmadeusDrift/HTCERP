@@ -1,6 +1,8 @@
 import { Hono } from 'hono'
+import { z } from 'zod'
 import type { AppEnv } from '../../apps/api/src/bindings'
 import { PublicError } from '../contracts/errors'
+import { performanceReport, performanceSkus, setPerformanceOwner } from './live'
 import {
   daysBefore,
   type Listing,
@@ -11,6 +13,7 @@ import {
   salesDay,
   summarize,
 } from './report'
+import { launchPerformanceSync } from './sync'
 
 // Server-only fixtures. Each synthetic day represents one US Haul store.
 // The first order has both JIT and standard lines. Issued units and proceeds are
@@ -94,7 +97,7 @@ function simulatedDay(date: string, offset: number): SalesDay {
 }
 
 export const storeSalesRoutes = new Hono<AppEnv>()
-storeSalesRoutes.get('/store-sales', (c) => {
+storeSalesRoutes.get('/store-sales', async (c) => {
   const yesterday = daysBefore(salesDay(new Date()), 1)
   const report: StoreSales = { source: 'pending', yesterday, days: [] }
   if (c.req.query('view') === 'preview') {
@@ -103,6 +106,31 @@ storeSalesRoutes.get('/store-sales', (c) => {
     report.days = Array.from({ length: 7 }, (_, offset) =>
       simulatedDay(daysBefore(yesterday, offset), offset),
     )
-  }
+  } else return c.json(await performanceReport(c.env, c.var.actor))
   return c.json(report)
+})
+
+storeSalesRoutes.post('/store-sales/sync', async (c) => {
+  if (c.var.actor.role !== 'admin') throw new PublicError('FORBIDDEN', '仅管理员可启动同步。', 403)
+  const run = await launchPerformanceSync(c.env)
+  if (!run)
+    throw new PublicError('NOT_CONFIGURED', '请先完成当前店铺的 Amazon 连接，或稍后再同步。', 409)
+  return c.json({ id: run.id, status: run.status }, 202)
+})
+storeSalesRoutes.get('/store-sales/skus', async (c) => {
+  const query = z
+    .string()
+    .max(128)
+    .safeParse(c.req.query('q') ?? '')
+  if (!query.success) throw new PublicError('INVALID_INPUT', 'SKU 搜索内容过长。', 400)
+  return c.json(await performanceSkus(c.env, c.var.actor, query.data.trim()))
+})
+storeSalesRoutes.post('/store-sales/owner', async (c) => {
+  const parsed = z
+    .object({ sku: z.string().min(1).max(256), accountId: z.string().min(1).max(128).nullable() })
+    .strict()
+    .safeParse(await c.req.json())
+  if (!parsed.success) throw new PublicError('INVALID_INPUT', '请选择 SKU 和负责运营。', 400)
+  await setPerformanceOwner(c.env, c.var.actor, parsed.data.sku, parsed.data.accountId)
+  return c.json({ ok: true })
 })

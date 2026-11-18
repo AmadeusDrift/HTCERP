@@ -1,9 +1,9 @@
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, readdirSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { fileURLToPath } from 'node:url'
-import { acquireLocalState, stateDir } from './local-state.mjs'
+import { acquireLocalState, stateDir, testing } from './local-state.mjs'
 
 const root = fileURLToPath(new URL('../', import.meta.url))
 process.chdir(root)
@@ -48,4 +48,10 @@ const targets = paths.filter((path) => {
   }
 })
 if (targets.length !== 1) throw new Error('无法唯一识别已迁移的本地 D1 数据库。')
-run(process.env.PYTHON ?? 'python', ['scripts/bootstrap.py', '--sqlite', targets[0]])
+if (existsSync('../probe-output/expanded/responses')) {
+  run(process.env.PYTHON ?? 'python', ['scripts/bootstrap.py', '--sqlite', targets[0]])
+} else if (testing) {
+  throw new Error('端到端测试需要本地私有商品样本 probe-output。')
+} else {
+  console.log('本地数据库已迁移，从空商品库启动。')
+}

@@ -19,7 +19,9 @@ pnpm db:local
 pnpm dev
 ```
 
-下次直接运行 `pnpm dev`。前端代码修改后运行 `pnpm build`。需要应用数据库迁移时先运行 `pnpm stop`，再运行 `pnpm db:local` 和 `pnpm dev`。工作台数据保存在忽略提交的 `.local/state` 下。浏览器端只加载当前页。
+下次直接运行 `pnpm dev`。前端或 Seller Flex 插件代码修改后运行 `pnpm build`，构建会根据插件清单版本重新生成网页上的下载包。需要应用数据库迁移时先运行 `pnpm stop`，再运行 `pnpm db:local` 和 `pnpm dev`。工作台数据保存在忽略提交的 `.local/state` 下。浏览器端只加载当前页。
+
+`pnpm db:local` 可在新检出的空商品库上运行。完整端到端测试需要工作区根目录下的私有 `probe-output/` 样本。店铺业绩的人员和 SKU 归属通过私有数据导入，新环境应在创建成员账号后载入经授权的映射。迁移 `0037` 建立相关表，`0038` 保留原迁移编号。
 
 ## 主管可以复核什么
 

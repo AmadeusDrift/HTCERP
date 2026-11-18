@@ -1,0 +1,137 @@
+.order-sorting-page {
+  display: grid;
+  gap: 20px;
+}
+.sorting-tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.sorting-tabs button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--surface, #fff);
+  color: var(--muted, #64748b);
+  border: 1px solid var(--border, #e2e8f0);
+}
+.sorting-tabs button.active {
+  background: #ecf5ff;
+  color: #1756a9;
+  border-color: #a9c9ef;
+}
+.sorting-upload {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 24px;
+  border: 1px dashed #b7c8df;
+  border-radius: 10px;
+  background: #f7faff;
+}
+.sorting-upload span {
+  flex: 1;
+  min-width: 220px;
+}
+.sorting-upload small {
+  display: block;
+  margin-top: 6px;
+  color: #64748b;
+}
+.sorting-upload input {
+  max-width: 100%;
+}
+.sorting-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.sorting-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px;
+  padding: 16px 0;
+  border-bottom: 1px solid #e2e8f0;
+}
+.sorting-stats small {
+  display: block;
+  color: #64748b;
+  margin-bottom: 8px;
+}
+.sorting-stats strong {
+  font-size: 22px;
+  font-variant-numeric: tabular-nums;
+}
+.sorting-filename {
+  display: block;
+  color: #64748b;
+  margin-top: 5px;
+}
+.sorting-empty {
+  padding: 32px;
+  text-align: center;
+  color: #64748b;
+}
+.sorting-attributes table {
+  min-width: 1500px;
+}
+.sorting-attributes td input {
+  width: 100%;
+  min-width: 100px;
+  padding: 7px 8px;
+}
+.sorting-attributes td:nth-child(4) input,
+.sorting-attributes td:nth-child(5) input {
+  min-width: 200px;
+}
+.sorting-imports {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+}
+.sorting-imports label {
+  display: grid;
+  gap: 9px;
+}
+.sorting-search {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.sorting-search input {
+  max-width: 480px;
+  flex: 1;
+}
+.sorting-additions {
+  max-height: 260px;
+  overflow: auto;
+}
+.sorting-additions small {
+  color: #64748b;
+  margin-left: 12px;
+}
+.order-sorting-page .table-wrap {
+  overflow-x: auto;
+}
+.order-sorting-page .actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+@media (max-width: 700px) {
+  .sorting-stats {
+    grid-template-columns: 1fr 1fr;
+  }
+  .sorting-imports {
+    grid-template-columns: 1fr;
+  }
+  .sorting-upload {
+    padding: 16px;
+  }
+  .sorting-stats strong {
+    font-size: 19px;
+  }
+}

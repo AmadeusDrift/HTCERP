@@ -4,6 +4,7 @@ const fields = {
   geekbi: ['GB_APP_KEY', 'GB_APP_SECRET'],
   openrouter: ['OPENROUTER_API_KEY'],
   amazon: ['SP_CLIENT_ID', 'SP_CLIENT_SECRET', 'SP_REFRESH_TOKEN'],
+  wecom: ['WECOM_CORP_ID', 'WECOM_AGENT_ID', 'WECOM_SECRET'],
 } as const
 export type Provider = keyof typeof fields
 type Field = (typeof fields)[Provider][number]
@@ -18,7 +19,8 @@ export interface ConnectionBindings extends Credentials, Partial<Record<SlotBind
   OPENROUTER_CONFIGURED?: string
 }
 export const isProvider = (name: string): name is Provider => Object.hasOwn(fields, name)
-export const credentialEditing = (env: ConnectionBindings) =>
+type VaultBindings = Pick<ConnectionBindings, 'CONNECTIONS_KEY'>
+export const credentialEditing = (env: VaultBindings) =>
   typeof env.CONNECTIONS_KEY === 'string' && /^[0-9a-f]{64}$/i.test(env.CONNECTIONS_KEY)
 const encoder = new TextEncoder()
 const base64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes))
@@ -37,11 +39,43 @@ function geekBindings(env: ConnectionBindings, slot: number) {
 }
 const aad = (provider: string) => encoder.encode('workbench/connection-credentials/v1/' + provider)
 
-async function vaultKey(env: ConnectionBindings) {
+async function vaultKey(env: VaultBindings) {
   if (!credentialEditing(env))
     throw new PublicError('CREDENTIAL_STORE_UNAVAILABLE', '服务端尚未配置有效的凭证加密密钥。', 503)
   const bytes = Uint8Array.from(env.CONNECTIONS_KEY!.match(/../g)!, (pair) => Number.parseInt(pair, 16))
   return crypto.subtle.importKey('raw', bytes, 'AES-GCM', false, ['encrypt', 'decrypt'])
+}
+
+export async function sealCredential(env: VaultBindings, scope: string, value: string) {
+  const key = await vaultKey(env)
+  const nonce = crypto.getRandomValues(new Uint8Array(12))
+  const encrypted = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv: nonce, additionalData: aad(scope) },
+    key,
+    encoder.encode(value),
+  )
+  return { nonce: base64(nonce), ciphertext: base64(new Uint8Array(encrypted)) }
+}
+
+async function decryptCredential(
+  key: CryptoKey,
+  scope: string,
+  record: { nonce: string; ciphertext: string },
+) {
+  const data = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: fromBase64(record.nonce), additionalData: aad(scope) },
+    key,
+    fromBase64(record.ciphertext),
+  )
+  return new TextDecoder().decode(data)
+}
+
+export async function openCredential(
+  env: VaultBindings,
+  scope: string,
+  record: { nonce: string; ciphertext: string },
+) {
+  return decryptCredential(await vaultKey(env), scope, record)
 }
 function checked(provider: Provider, value: unknown): Credentials {
   const keys = fields[provider]
@@ -69,19 +103,13 @@ export async function replaceCredentials(
 ) {
   const id = recordId(provider, slot)
   const credentials = checked(provider, value)
-  const key = await vaultKey(env)
-  const nonce = crypto.getRandomValues(new Uint8Array(12))
-  const encrypted = await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv: nonce, additionalData: aad(id) },
-    key,
-    encoder.encode(JSON.stringify(credentials)),
-  )
+  const { nonce, ciphertext } = await sealCredential(env, id, JSON.stringify(credentials))
   // Recheck the administrator at the write, including the account-free local development session.
   const saved =
     await env.DB.prepare(`INSERT OR REPLACE INTO connection_credentials(provider,version,nonce,ciphertext)
     SELECT ?,1,?,? WHERE EXISTS(SELECT 1 FROM accounts WHERE id=? AND role='admin' AND active=1)
       OR (?=1 AND NOT EXISTS(SELECT 1 FROM accounts))`)
-      .bind(id, base64(nonce), base64(new Uint8Array(encrypted)), actor.id, Number(actor.local))
+      .bind(id, nonce, ciphertext, actor.id, Number(actor.local))
       .run()
   if (!saved.meta.changes) throw new PublicError('FORBIDDEN', '仅启用的管理员可更新服务凭证。', 403)
 }
@@ -102,13 +130,8 @@ export async function providerCredentials(env: ConnectionBindings, provider: Pro
   const key = await vaultKey(env)
   try {
     if (row.version !== 1) throw new Error()
-    const data = await crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv: fromBase64(row.nonce), additionalData: aad(id) },
-      key,
-      fromBase64(row.ciphertext),
-    )
     return {
-      credentials: checked(provider, JSON.parse(new TextDecoder().decode(data))),
+      credentials: checked(provider, JSON.parse(await decryptCredential(key, id, row))),
       revision: row.nonce,
     }
   } catch {

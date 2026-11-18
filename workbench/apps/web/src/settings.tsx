@@ -14,6 +14,8 @@ import { useEffect, useState } from 'react'
 import { Accounts } from './accounts'
 import { ConnectionCredentials, type CredentialProvider } from './connection-credentials'
 import { Facts } from './detail'
+import { DailySalesNotifications, InfringementNotifications } from './infringement-notifications'
+import { InventorySync } from './inventory-sync'
 import {
   type Connections,
   type GeekSlot,
@@ -27,6 +29,7 @@ import {
   type Settings as StrategyFields,
 } from './models'
 import { PersonalSettings } from './personal'
+import { PartnerApiSettings } from './partner-api'
 import { Select, selectOptions } from './select'
 import {
   amount,
@@ -237,12 +240,17 @@ const employeeTabs = { schedule: '调度与预算', personal: '个人设置' }
 const adminTabs = {
   connections: '数据连接',
   models: 'AI 模型',
+  notifications: '侵权提醒',
+  'daily-sales': '销量日报',
+  inventory: '库存联调',
+  'partner-api': '业务 API',
   schedule: employeeTabs.schedule,
   members: '成员管理',
   personal: employeeTabs.personal,
 }
-function ListingFieldCheck({ configured }: { configured: boolean }) {
-  const [sellerId, setSellerId] = useState('')
+function ListingFieldCheck({ configured, saved }: { configured: boolean; saved: string }) {
+  const [sellerId, setSellerId] = useState(saved)
+  const save = useWrite()
   const sample = useWrite<{
     sampled: number
     withSku: number
@@ -255,13 +263,14 @@ function ListingFieldCheck({ configured }: { configured: boolean }) {
   const result = sample.data
   return (
     <div className="panel-body stack">
-      <h3>查询已刊登商品记录</h3>
+      <h3>美国站店铺</h3>
+      <p>保存一次 Seller ID，刊登查询和文字侵权巡检都会使用这家店铺。</p>
       <p>按创建时间抽查美国站最近的最多 5 条刊登，核对 SKU、创建日期和变体关系。</p>
       <Form
         className="stack"
         onSubmit={() =>
-          sample.mutate({
-            path: '/connections/amazon/listing-fields',
+          save.mutate({
+            path: '/connections/amazon/seller',
             body: { sellerId: sellerId.trim() },
           })
         }
@@ -273,7 +282,7 @@ function ListingFieldCheck({ configured }: { configured: boolean }) {
             value={sellerId}
             maxLength={64}
             required
-            disabled={!configured || sample.isPending}
+            disabled={save.isPending}
             onChange={(e) => {
               setSellerId(e.target.value)
               sample.reset()
@@ -290,12 +299,15 @@ function ListingFieldCheck({ configured }: { configured: boolean }) {
           </a>
           <button
             type="submit"
-            disabled={!configured || sample.isPending || !/^[A-Z0-9]{5,64}$/.test(sellerId.trim())}
+            disabled={save.isPending || sellerId.trim() === saved || !/^[A-Z0-9]{5,64}$/.test(sellerId.trim())}
           >
-            {sample.isPending ? '正在读取…' : '查询刊登记录'}
+            {save.isPending ? '正在保存…' : '保存 Seller ID'}
           </button>
         </div>
       </Form>
+      <ErrorBox error={save.error} />
+      {saved && <small>已保存店铺：{saved}</small>}
+      <button type="button" disabled={!configured || !saved || sellerId.trim() !== saved || sample.isPending} onClick={() => sample.mutate({ path: '/connections/amazon/listing-fields', body: {} })}>查询刊登记录</button>
       {result && (
         <Notice success>
           {result.sampled ? (
@@ -349,7 +361,7 @@ export function Settings() {
   function credentialFields(names: string): [string, React.ReactNode][] {
     return admin ? [['凭据字段', <code key="fields">{names}</code>]] : []
   }
-  function credentialControl(provider: CredentialProvider) {
+  function credentialControl(provider: Exclude<CredentialProvider, 'wecom'>) {
     if (!admin || !c) return null
     return (
       <ConnectionCredentials
@@ -392,6 +404,10 @@ export function Settings() {
           </button>
         ))}
       </div>
+      {admin && tab === 'notifications' && <InfringementNotifications />}
+      {admin && tab === 'daily-sales' && <DailySalesNotifications />}
+      {admin && tab === 'inventory' && <InventorySync />}
+      {admin && tab === 'partner-api' && <PartnerApiSettings />}
       {admin && tab === 'connections' && (
         <div className="workspace-two">
           <div className="stack">
@@ -489,7 +505,7 @@ export function Settings() {
                     </Notice>
                   )}
                   <ErrorBox error={orders.error} />
-                  <ListingFieldCheck key={listingVersion} configured={c!.amazon.configured} />
+                  <ListingFieldCheck key={listingVersion + ':' + (c!.amazon.sellerId ?? '')} configured={c!.amazon.configured} saved={c!.amazon.sellerId ?? ''} />
                 </Connector>
                 <Connector
                   name="OpenRouter"

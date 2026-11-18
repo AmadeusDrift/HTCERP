@@ -17,6 +17,7 @@ async function openSettings(
     credentialEditing,
     geekbi: { configured: false, slots: [1, 2, 3, 4, 5].map((slot) => ({ slot, configured: false })) },
     amazon: {
+      sellerId: '',
       configured: amazonConfigured,
       status: amazonConfigured ? 'catalog_verified' : 'unconfigured',
     },
@@ -52,6 +53,10 @@ async function openSettings(
     if (pathname === '/api/me/preferences')
       return route.fulfill({ json: { view: 'table', pageSize: 50, presets: [] } })
     writes.push({ path: pathname, body: request.postDataJSON() })
+    if (pathname === '/api/connections/amazon/seller' && request.method() === 'POST') {
+      status.amazon.sellerId = request.postDataJSON().sellerId
+      return route.fulfill({ json: { ok: true } })
+    }
     if (pathname === '/api/connections/amazon/listing-fields' && request.method() === 'POST')
       return route.fulfill({
         json: {
@@ -83,23 +88,28 @@ async function openSettings(
   return writes
 }
 
-test('管理员按本次输入的 Seller ID 查询已刊登记录并查看样本覆盖', async ({ page, baseURL }) => {
+test('管理员保存店铺后刷新仍可直接查询刊登记录', async ({ page, baseURL }) => {
   const writes = await openSettings(page, baseURL!, 'admin', true, true)
   const control = page.getByRole('button', { name: '查询刊登记录' })
   await expect(control).toBeDisabled()
   const input = page.getByLabel('Seller ID（Merchant Token）', { exact: true })
   await input.fill('AB123456789')
+  await page.getByRole('button', { name: '保存 Seller ID' }).click()
+  await expect(control).toBeEnabled()
+  await page.reload()
+  await expect(input).toHaveValue('AB123456789')
   await control.click()
   await expect(page.getByRole('status').filter({ hasText: '本页 2 条' })).toContainText(
     '关系待确认 1 条',
   )
   expect(writes).toEqual([
-    { path: '/api/connections/amazon/listing-fields', body: { sellerId: 'AB123456789' } },
+    { path: '/api/connections/amazon/seller', body: { sellerId: 'AB123456789' } },
+    { path: '/api/connections/amazon/listing-fields', body: {} },
   ])
   await input.fill('AB987654321')
   await expect(page.getByText(/本页 2 条/)).toHaveCount(0)
   await page.reload()
-  await expect(input).toHaveValue('')
+  await expect(input).toHaveValue('AB123456789')
 })
 
 test('管理员可配置三种服务，更新时重新填写整组凭据', async ({ page, baseURL }) => {

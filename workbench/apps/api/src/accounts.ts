@@ -18,24 +18,26 @@ const username = z
   .trim()
   .toLowerCase()
   .regex(/^[a-z0-9][a-z0-9._-]{2,39}$/)
-const password = z.string().min(12).max(128)
+const memberPassword = z.string().min(8).max(128)
+const adminPassword = z.string().min(12).max(128)
+const defaultOperatorPassword = '12345678'
 const role = z.enum(['viewer', 'operator', 'admin'])
-const credentials = z.strictObject({ username, password })
+const credentials = z.strictObject({ username, password: adminPassword })
 const loginInput = z.strictObject({ username, password: z.string().min(1).max(128) })
 const position = z.enum(positions).nullable().optional()
-const newAccount = credentials.extend({ password: z.string().min(8).max(128), role: role.default('viewer'), position })
+const newAccount = credentials.extend({ password: memberPassword.optional(), role: role.default('viewer'), position })
 const editAccount = z
   .strictObject({
     role: role.optional(),
     position,
     active: z.boolean().optional(),
-    password: password.optional(),
+    password: memberPassword.optional(),
   })
   .refine((v) => Object.keys(v).length > 0)
 const invalid = () =>
   new PublicError(
     'INVALID_INPUT',
-    '请检查输入。用户名需为 3–40 个字母、数字、点、下划线或短横线，且以字母或数字开头；成员初始密码需为 8–128 个字符，管理员首次设置或重置密码需为 12–128 个字符。',
+    '请检查输入。用户名需为 3–40 个字母、数字、点、下划线或短横线，且以字母或数字开头；成员初始密码和重置密码需为 8–128 个字符，管理员首次设置或重置密码需为 12–128 个字符。',
     400,
   )
 function parse<T>(schema: z.ZodType<T>, data: unknown): T {
@@ -61,8 +63,8 @@ export function guardWrite(request: Request, form = false) {
 
 async function insertAccount(c: Context<AppEnv>, data: z.infer<typeof newAccount>, first: boolean) {
   if (first && data.role !== 'admin') throw new PublicError('FIRST_ADMIN', '请先建立管理员账号。', 409)
-  if (first) parse(password, data.password)
-  const { salt, hash } = await newCredentials(data.password)
+  const initialPassword = data.password ?? (data.role === 'operator' ? defaultOperatorPassword : undefined)
+  const { salt, hash } = await newCredentials(parse(first ? adminPassword : memberPassword, initialPassword))
   const allowed = first
     ? 'NOT EXISTS(SELECT 1 FROM accounts)'
     : "EXISTS(SELECT 1 FROM accounts WHERE id=? AND active=1 AND role='admin')"
@@ -141,6 +143,8 @@ accountRoutes.post('/accounts', async (c) =>
 )
 accountRoutes.patch('/accounts/:id', async (c) => {
   const { role, position, active, password } = parse(editAccount, await c.req.json())
+  const shortReset = password !== undefined && !adminPassword.safeParse(password).success
+  if (shortReset && role === 'admin') throw invalid()
   const replacement = password === undefined ? null : await newCredentials(password)
   const id = c.req.param('id')
   // Keep the role/activation predicate in the UPDATE so simultaneous demotions cannot remove the last admin.
@@ -150,6 +154,7 @@ accountRoutes.patch('/accounts/:id', async (c) => {
     position=CASE WHEN ?7=1 THEN ?8 ELSE position END,
     auth_version=auth_version+CASE WHEN ?4 IS NOT NULL OR (?2 IS NOT NULL AND active<>?2) THEN 1 ELSE 0 END
     WHERE id=?5 AND EXISTS (SELECT 1 FROM accounts WHERE id=?6 AND active=1 AND role='admin')
+    AND (?9=0 OR role<>'admin')
     AND (role<>'admin' OR active=0 OR (coalesce(?1,role)='admin' AND coalesce(?2,active)=1)
       OR EXISTS(SELECT 1 FROM accounts WHERE id<>?5 AND role='admin' AND active=1))
     RETURNING ${accountFields}`)
@@ -162,11 +167,14 @@ accountRoutes.patch('/accounts/:id', async (c) => {
         c.var.actor.id,
         Number(position !== undefined),
         position ?? null,
+        Number(shortReset),
       )
       .first<AccountRow>()
   if (!row) {
-    if (!(await c.env.DB.prepare('SELECT id FROM accounts WHERE id=?').bind(id).first()))
+    const existing = await c.env.DB.prepare('SELECT role FROM accounts WHERE id=?').bind(id).first<{ role: string }>()
+    if (!existing)
       throw new PublicError('NOT_FOUND', '找不到该账号。', 404)
+    if (shortReset && existing.role === 'admin') throw invalid()
     throw new PublicError('CONFLICT', '需要保留至少一名启用的管理员，请确认当前账号仍有管理权限。', 409)
   }
   return c.json(publicAccount(row))

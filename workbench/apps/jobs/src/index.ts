@@ -1,6 +1,8 @@
 export { AssistantWorkflow } from './assistant-workflow'
 
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from 'cloudflare:workers'
+import { drainGroupNotifications, sendGroupDelivery } from '../../../packages/group-notifications/delivery'
+import { archiveInfringementHistory, previewInfringement, queueInfringements, scanInfringements } from '../../../packages/group-notifications/infringement'
 import { runAmazonComparison } from '../../../packages/operations/amazon-comparison'
 import { runAssistantOperation } from '../../../packages/operations/assistant-actions'
 import {
@@ -14,6 +16,16 @@ import {
   storedResult,
 } from '../../../packages/operations/execution'
 import { runSchedule } from '../../../packages/operations/jobs'
+import { dailySalesWorkflow, scheduleDailySales } from '../../../packages/store-sales/jobs'
+import { launchPerformanceSync, performanceSyncWorkflow } from '../../../packages/store-sales/sync'
+import { schedulePartnerSales } from '../../../packages/partner-api/scheduled'
+import { InventoryAutomatic } from '../../../packages/inventory-sync/automatic'
+import { inventoryOrderHistoryWorkflow,launchInventoryOrderHistory } from '../../../packages/inventory-sync/order-history'
+import { inventoryPatrolWorkflow, scheduleInventoryPatrol } from '../../../packages/inventory-sync/source-jobs'
+import { lastSalesDay } from '../../../packages/store-sales/daily'
+import { auditWorkflow, launchAudit } from '../../../packages/title-audit/jobs'
+import { probeWeeklyReviewCounts, scheduleWeeklyFeedback, weeklyFeedbackWorkflow } from '../../../packages/weekly-feedback/jobs'
+import { previewWeeklyLowRatings } from '../../../packages/weekly-feedback/low-ratings'
 import type { OpsBindings } from '../../../packages/operations/model'
 import { getRun } from '../../../packages/operations/model'
 import { Stop } from '../../../packages/operations/providers'
@@ -23,12 +35,64 @@ import { screenReportProduct } from './report-price-screen'
 
 type WorkflowInput = {
   runId: string
+  salesTick?: number
+  repairWeeklyFeedback?: boolean
+  resolveWeeklyFeedbackListings?: boolean
+  reviewCountQueryId?: string
+  previewLowRatings?: boolean
+  filterLowRatings?: boolean
   reportScreen?: { productId: string; query: string }
   expandSeeds?: Seed[]
 }
 export class ResearchWorkflow extends WorkflowEntrypoint<OpsBindings, WorkflowInput> {
   async run(event: WorkflowEvent<WorkflowInput>, step: WorkflowStep) {
     const id = event.payload.runId
+    if (id.startsWith('performance-sync-')) return performanceSyncWorkflow(this.env, step, id)
+    if (id.startsWith('inventory-history-')) return inventoryOrderHistoryWorkflow(this.env,id,step)
+    if (id.startsWith('inventory-patrol-')) return inventoryPatrolWorkflow(this.env, id, step)
+    if (id === 'weekly-feedback-review-count-probe')
+      return probeWeeklyReviewCounts(this.env, step, event.payload.reviewCountQueryId)
+    if (id.startsWith('weekly-feedback-') && event.payload.previewLowRatings)
+      return previewWeeklyLowRatings(this.env, step, id)
+    if (id.startsWith('group-notification-trial-')) {
+      await step.do('send-group-trial', () => sendGroupDelivery(this.env, id))
+      return
+    }
+    const dailySale = /^daily-sales-(auto|preview|backfill)-(\d{4}-\d{2}-\d{2})(?:-([\da-f-]{36}))?$/.exec(id)
+    if (dailySale)
+      return dailySalesWorkflow(this.env, step, id, dailySale[2], dailySale[1] !== 'preview', event.payload.salesTick)
+    const salesSlot = /^daily-sales-slot-(\d{13})$/.exec(id)
+    if (salesSlot) {
+      const tick = Number(salesSlot[1])
+      return dailySalesWorkflow(this.env, step, id, lastSalesDay(tick), true, tick)
+    }
+    if (id === 'infringement-history-20261113')
+      return archiveInfringementHistory(this.env, step, id)
+    if (id.startsWith('infringement-backfill-')) {
+      const tick = Number(id.slice('infringement-backfill-'.length))
+      if (!Number.isSafeInteger(tick) || tick <= 0) throw new Error('Invalid infringement backfill time')
+      return scanInfringements(this.env, step, tick, event.instanceId)
+    }
+    if (id.startsWith('infringement-preview-')) {
+      const sku = id.slice('infringement-preview-'.length)
+      if (!sku.trim() || sku.length > 120) throw new Error('Invalid preview SKU')
+      return step.do('preview-infringement', () => previewInfringement(this.env, sku))
+    }
+    if (id.startsWith('group-notification-tick-')) {
+      const tick = Number(id.slice('group-notification-tick-'.length))
+      await scanInfringements(this.env, step, tick, event.instanceId)
+      await step.do('enqueue-infringement-notifications', () => queueInfringements(this.env))
+      await step.do('send-group-notifications', () => drainGroupNotifications(this.env))
+      return
+    }
+    if (id.startsWith('weekly-feedback-'))
+      return weeklyFeedbackWorkflow(
+        this.env, id, step,
+        event.payload.repairWeeklyFeedback === true || event.payload.resolveWeeklyFeedbackListings === true,
+        event.payload.resolveWeeklyFeedbackListings === true,
+        event.payload.filterLowRatings === true,
+      )
+    if (id.startsWith('title-audit-')) return auditWorkflow(this.env,id,step)
     const operation = await step.do(
       'read-explicit-operation-v1',
       async () => JSON.parse((await getRun(this.env.DB, id)).inputs_json).operation ?? null,
@@ -163,6 +227,36 @@ export class ResearchWorkflow extends WorkflowEntrypoint<OpsBindings, WorkflowIn
 }
 export default {
   async scheduled(event: ScheduledController, env: OpsBindings) {
+    if (event.cron === '*/5 * * * *') {
+      await scheduleInventoryPatrol(env, event.scheduledTime)
+      const automatic=new InventoryAutomatic(env)
+      await automatic.plan(event.scheduledTime,500)
+      await automatic.prune()
+      await automatic.reconcile(event.scheduledTime)
+      const automaticSettings=await env.DB.prepare('SELECT enabled FROM inventory_automatic_settings WHERE singleton=1').first<{enabled:number}>()
+      await launchInventoryOrderHistory(env,automaticSettings?.enabled===1,event.scheduledTime)
+      return
+    }
+    if(event.cron==='*/30 * * * *'){
+      await Promise.all([
+        launchPerformanceSync(env, event.scheduledTime),
+        scheduleWeeklyFeedback(env, event.scheduledTime),
+        scheduleDailySales(env, event.scheduledTime),
+        schedulePartnerSales(env, event.scheduledTime),
+        (async () => {
+          const store=await env.DB.prepare('SELECT seller FROM title_audit_store WHERE singleton=1 AND enabled=1').first<{seller:string}>()
+          if(store)await launchAudit(env,store.seller,event.scheduledTime)
+        })(),
+        (async () => {
+          const group = await env.DB.prepare('SELECT 1 FROM notification_groups WHERE enabled=1 LIMIT 1').first()
+          if (group) {
+            const id = 'group-notification-tick-' + event.scheduledTime
+            await env.RUNNER.create({ id, params: { runId: id } })
+          }
+        })(),
+      ])
+      return
+    }
     await runSchedule(env, event.scheduledTime)
   },
   fetch() {

@@ -176,7 +176,7 @@ export interface Connections {
   productData?: { configured: boolean }
   geekbi?: { configured: boolean; slots?: GeekSlot[] }
   openrouter: { configured: boolean }
-  amazon: { configured: boolean; status: string; lastTestedAt?: string | null }
+  amazon: { sellerId?: string | null; configured: boolean; status: string; lastTestedAt?: string | null }
   haul: { configured: boolean }
 }
 export interface Settings {

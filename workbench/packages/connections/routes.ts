@@ -38,6 +38,7 @@ connections.get('/connections', async (c) => {
   const last = await c.env.DB.prepare(
     "SELECT status,tested_at AS lastTestedAt FROM connection_tests WHERE service='amazon'",
   ).first<{ status: string; lastTestedAt: string }>()
+  const store = await c.env.DB.prepare('SELECT seller FROM title_audit_store WHERE singleton=1').first<{ seller: string }>()
   return c.json({
     credentialEditing: credentialEditing(c.env),
     productData: { configured: geekbiConfigured },
@@ -45,6 +46,7 @@ connections.get('/connections', async (c) => {
     openrouter: { configured: status.openrouter },
     amazon: {
       configured: status.amazon,
+      sellerId: store?.seller ?? null,
       status: status.amazon ? (last?.status ?? 'untested') : 'unconfigured',
       lastTestedAt: last?.lastTestedAt ?? null,
     },
@@ -78,13 +80,25 @@ connections.post('/connections/amazon/order-fields', async (c) => {
   const { credentials } = await providerCredentials(c.env, 'amazon')
   return c.json(await new AmazonUS(credentials).checkHaulOrderFields())
 })
+connections.post('/connections/amazon/seller', async (c) => {
+  if (c.var.actor.role !== 'admin') throw new PublicError('FORBIDDEN', '仅管理员可设置店铺。', 403)
+  const input = await c.req.json<{ sellerId?: unknown }>().catch(() => null)
+  const seller = typeof input?.sellerId === 'string' ? input.sellerId.trim() : ''
+  if (!/^[A-Z0-9]{5,64}$/.test(seller)) throw new PublicError('INVALID_INPUT', '请填写有效的美国站 Seller ID。', 400)
+  await c.env.DB.prepare('INSERT INTO title_audit_store(singleton,seller,enabled) VALUES(1,?,0) ON CONFLICT(singleton) DO UPDATE SET seller=excluded.seller').bind(seller).run()
+  return c.json({ ok: true })
+})
 connections.post('/connections/amazon/listing-fields', async (c) => {
   if (c.var.actor.role !== 'admin') throw new PublicError('FORBIDDEN', '仅管理员可核对刊登记录。', 403)
   const input = await c.req.json<{ sellerId?: unknown }>().catch(() => null)
-  if (!input || typeof input.sellerId !== 'string' || Object.keys(input).length !== 1)
-    throw new PublicError('INVALID_INPUT', '请填写卖家中心的 Seller ID。', 400)
+  if (!input || typeof input !== 'object' || Object.keys(input).some(k => k !== 'sellerId') ||
+      (input.sellerId !== undefined && typeof input.sellerId !== 'string'))
+    throw new PublicError('INVALID_INPUT', '无效的刊登查询。', 400)
+  const seller = typeof input.sellerId === 'string' ? input.sellerId.trim() :
+    (await c.env.DB.prepare('SELECT seller FROM title_audit_store WHERE singleton=1').first<{ seller: string }>())?.seller
+  if (!seller) throw new PublicError('INVALID_INPUT', '请先在 Amazon SP-API 数据连接中保存 Seller ID。', 409)
   const { credentials } = await providerCredentials(c.env, 'amazon')
-  return c.json(await new AmazonUS(credentials).searchListingsItems(input.sellerId.trim()))
+  return c.json(await new AmazonUS(credentials).searchListingsItems(seller))
 })
 connections.post('/connections/amazon/test', async (c) => {
   const { credentials, revision } = await providerCredentials(c.env, 'amazon')

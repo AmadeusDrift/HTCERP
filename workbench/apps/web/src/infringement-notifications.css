@@ -1,0 +1,25 @@
+.infringement-notification-settings {
+  max-width: 820px;
+}
+.infringement-notification-current,
+.infringement-notification-buttons {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.infringement-notification-current {
+  justify-content: space-between;
+}
+.infringement-notification-current strong {
+  font-size: 18px;
+  overflow-wrap: anywhere;
+}
+.infringement-notification-actions {
+  border-top: 1px solid var(--line);
+  padding-top: 16px;
+}
+.infringement-notification-group + .infringement-notification-group {
+  border-top: 1px solid var(--line);
+  padding-top: 12px;
+}

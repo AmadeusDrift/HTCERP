@@ -18,6 +18,9 @@ function AccountDialog({
 }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<unknown>(null)
+  const [selectedRole, setSelectedRole] = useState<string>(first ? 'admin' : account?.role || 'viewer')
+  const useDefaultPassword = !account && selectedRole === 'operator'
+  const passwordMinimum = first || (account && (account.role === 'admin' || selectedRole === 'admin')) ? 12 : 8
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (busy) return
@@ -35,7 +38,7 @@ function AccountDialog({
             username: String(form.get('username')).trim(),
             role,
             ...(position && { position }),
-            password,
+            ...(password && { password }),
           }),
         )
         return
@@ -91,7 +94,8 @@ function AccountDialog({
           <Select
             name="role"
             disabled={first}
-            defaultValue={first ? 'admin' : account?.role || 'viewer'}
+            value={selectedRole}
+            onValueChange={setSelectedRole}
             options={['viewer', 'operator', 'admin'].map((value) => ({ value, label: roles[value] }))}
           />
         </Field>
@@ -111,18 +115,20 @@ function AccountDialog({
           label={account ? '新密码' : '初始密码'}
           hint={
             account
-              ? '如需重置密码，请输入 12–128 个字符。留空将保留当前密码。'
+              ? `如需重置密码，请输入 ${passwordMinimum}–128 个字符。留空将保留当前密码。`
               : first
                 ? '首个管理员密码需为 12–128 个字符。'
-                : '使用 8–128 个字符，将初始密码私下交给成员。'
+                : useDefaultPassword
+                  ? '留空使用运营默认密码，也可以输入 8–128 个字符自定义密码。'
+                  : '使用 8–128 个字符，将初始密码私下交给成员。'
           }
         >
           <input
             name="password"
             type="password"
             autoComplete="new-password"
-            required={!account}
-            minLength={account || first ? 12 : 8}
+            required={!account && !useDefaultPassword}
+            minLength={passwordMinimum}
             maxLength={128}
           />
         </Field>

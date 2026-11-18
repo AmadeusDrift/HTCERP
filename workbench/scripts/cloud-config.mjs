@@ -35,11 +35,10 @@ for (const unit of units) {
       : flow.name + '-' + stage
     if (unit === 'api') flow.script_name = prefix ? prefix + '-jobs' : 'selection-jobs-' + stage
   }
-  if (unit === 'jobs') config.triggers = { crons: [] }
+  if (unit === 'jobs') {
+    config.triggers = { crons: stage === 'staging' ? [] : ['*/30 * * * *', '*/5 * * * *'] }
+  }
   if (unit === 'api') {
-    config.workflows[0].script_name = prefix
-      ? prefix + '-jobs'
-      : config.workflows[0].script_name + '-' + stage
     if (prefix) config.workers_dev = true
     else config.routes = [{ pattern: hostname, custom_domain: true }]
   }

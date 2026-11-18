@@ -2,6 +2,7 @@
   "$schema": "./node_modules/wrangler/config-schema.json",
   "compatibility_date": "2026-10-01",
   "send_metrics": false,
+  "alias": { "readable-stream": "./packages/order-sorting/worker-streams.cjs" },
   "workers_dev": false,
   "preview_urls": false,
   "d1_databases": [

@@ -1,6 +1,14 @@
-.env
+.env*
+!.env.example
 probe-output/
 __pycache__/
 .codex-remote-attachments/
 .vibestart-inspect/
 *.zip
+/bundle-api/
+/bundle-jobs/
+/outputs/
+/多组密钥与扩大探测说明.txt
+/极鲸云基础探测结果.txt
+/美国站扩大探测结果.txt
+/增长商品抽样核验结果.txt

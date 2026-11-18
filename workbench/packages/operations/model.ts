@@ -1,11 +1,12 @@
 import { z } from 'zod'
 import { type ConnectionBindings, connectionStatus } from '../connections/credentials'
 import { PublicError } from '../contracts/errors'
+import type { GroupNotificationBindings } from '../group-notifications/model'
 import { potentialScope } from './potential-scope'
 
-export interface OpsBindings extends ConnectionBindings {
+export interface OpsBindings extends ConnectionBindings, GroupNotificationBindings {
   ARCHIVE: R2Bucket
-  RUNNER: Workflow<{ runId: string }>
+  RUNNER: Workflow<{ runId: string; salesTick?: number }>
 }
 export const models = { research: 'openai/gpt-6.1-terra', decision: 'openai/gpt-6-luna-decisions' }
 export const promptVersion = 'opportunity-review-v1'
